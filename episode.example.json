@@ -46,5 +46,12 @@
       }
     }
   ],
+  "thumbnail": {
+    "enabled": true,
+    "max_width": 480,
+    "max_height": 320,
+    "quality": 75,
+    "cache_dir": ""
+  },
   "plugins": []
 }

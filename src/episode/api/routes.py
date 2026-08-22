@@ -14,6 +14,7 @@ from episode.api.errors import install_error_handlers
 from episode.api.runtime import OperationalView
 from episode.inventory import DeviceValidationService, InventoryService
 from episode.media.previews import CurrentViewService
+from episode.media.thumbnails import ThumbnailService
 from episode.media.timelapse import TimelapseService
 
 
@@ -22,6 +23,7 @@ def create_api(
     data_dir: str = "",
     snapshot_window: int = 1,
     timelapses: TimelapseService | None = None,
+    thumbnail_service: ThumbnailService | None = None,
     operations: OperationalView | None = None,
     inventory: InventoryService | None = None,
     validator: DeviceValidationService | None = None,
@@ -37,6 +39,7 @@ def create_api(
         data_dir=data_dir,
         snapshot_window=snapshot_window,
         timelapses=timelapses,
+        thumbnails=thumbnail_service,
         operations=operations,
         inventory=inventory,
         validator=validator,

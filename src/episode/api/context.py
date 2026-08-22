@@ -10,6 +10,7 @@ from episode.api.schemas import EventResponse
 from episode.inventory import DeviceValidationService, InventoryService
 from episode.media.previews import CurrentViewService
 from episode.media.timelapse import TimelapseService
+from episode.media.thumbnails import ThumbnailService
 
 
 @dataclass(slots=True)
@@ -24,6 +25,7 @@ class ApiContext:
     inventory: InventoryService | None = None
     validator: DeviceValidationService | None = None
     current_views: CurrentViewService | None = None
+    thumbnails: ThumbnailService | None = None
 
     def __post_init__(self) -> None:
         if self.timelapses is None:

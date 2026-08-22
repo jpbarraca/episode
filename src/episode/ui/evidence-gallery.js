@@ -34,8 +34,8 @@ function renderEvidenceItem(evidence, index) {
   const label = evidence.evidence_type;
   return `<article class="evidence-item" tabindex="0" role="button" onclick="showCarousel(null, ${index})" onkeydown="if(event.key==='Enter'||event.key===' ')showCarousel(null, ${index})">
     <div class="evidence-item-preview">
-      ${isVideo ? `<video src="${API}/evidence/${evidence.id}/file" preload="metadata"></video>` : ""}
-      ${isImage ? `<img src="${API}/evidence/${evidence.id}/file" loading="lazy" alt="">` : ""}
+      ${isVideo ? `<img src="${API}/evidence/${evidence.id}/thumbnail" loading="lazy" alt="">` : ""}
+      ${isImage ? `<img src="${API}/evidence/${evidence.id}/thumbnail" loading="lazy" alt="">` : ""}
       ${!isVideo && !isImage ? `<div class="evidence-item-file"><svg><use href="icons.svg?v=2#file"></use></svg><strong>${escHtml(titleCase(evidence.evidence_type))}</strong><span>${escHtml(evidence.mime_type || "Unknown format")}</span></div>` : ""}
       <span class="evidence-type-chip">${escHtml(titleCase(evidence.evidence_type))}</span>
     </div>
@@ -101,8 +101,8 @@ function renderEvidenceBundle(group, items, deviceNames, areaNames) {
         const deviceName = deviceNames.get(evidence.device_id) || evidence.device_id;
         return `<article class="evidence-archive-item" tabindex="0" role="button" onclick="showCarousel(null, ${index})" onkeydown="if(event.key==='Enter')showCarousel(null, ${index})">
           <div class="evidence-archive-preview">
-            ${isVideo ? `<video src="${API}/evidence/${evidence.id}/file" preload="metadata"></video>` : ""}
-            ${isImage ? `<img src="${API}/evidence/${evidence.id}/file" loading="lazy" alt="">` : ""}
+            ${isVideo ? `<img src="${API}/evidence/${evidence.id}/thumbnail" loading="lazy" alt="">` : ""}
+            ${isImage ? `<img src="${API}/evidence/${evidence.id}/thumbnail" loading="lazy" alt="">` : ""}
             ${!isVideo && !isImage ? `<div class="evidence-file-preview"><strong>${escHtml(titleCase(evidence.evidence_type))}</strong><span>${escHtml(evidence.mime_type || "Unknown format")}</span></div>` : ""}
             <span class="evidence-type-chip">${escHtml(titleCase(evidence.evidence_type))}</span>
           </div>

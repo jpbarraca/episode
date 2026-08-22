@@ -28,6 +28,7 @@ from episode.storage.inventory import InventoryStore
 from episode.storage.projection import EpisodeBundleProjector
 from episode.storage.provenance import ProvenanceStore
 from episode.storage.recovery import reconcile_episode_counts, reconcile_episode_paths
+from episode.media.thumbnails import ThumbnailService
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +44,10 @@ def _utc_iso(dt: datetime | None) -> str | None:
 
 
 class Repository:
-    def __init__(self, config: EpisodeConfig):
+    def __init__(self, config: EpisodeConfig, thumbnail_service: ThumbnailService | None = None):
         self._db_path = config.db_path
         self._data_dir = config.data_dir
+        self._thumbnail_service = thumbnail_service
         self._conn: aiosqlite.Connection | None = None
         self._provenance: ProvenanceStore | None = None
         self._inventory: InventoryStore | None = None
@@ -503,6 +505,30 @@ class Repository:
             (episode_id, evidence_id),
         )
         await self._conn.commit()
+
+    async def delete_evidence(self, evidence_id: str) -> bool:
+        """Delete evidence record and clean up associated thumbnails.
+
+        Thumbnail cleanup is fire-and-forget — failure does not affect
+        the primary evidence deletion or event/episode integrity.
+        """
+        evidence = await self.get_evidence(evidence_id)
+        if not evidence:
+            return False
+
+        await self._conn.execute(
+            "DELETE FROM evidence WHERE id = ?",
+            (evidence_id,),
+        )
+        await self._conn.commit()
+
+        if evidence.file_path and self._thumbnail_service:
+            try:
+                await asyncio.to_thread(self._thumbnail_service.delete, evidence.file_path)
+            except Exception:
+                logger.warning("Thumbnail cleanup failed for evidence %s", evidence_id)
+
+        return True
 
     async def update_evidence_event(self, evidence_id: str, event_id: str):
         await self._conn.execute(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import os
 
 from fastapi import APIRouter, HTTPException
@@ -98,5 +100,39 @@ def evidence_router(context: ApiContext) -> APIRouter:
         if not os.path.exists(evidence.file_path):
             raise HTTPException(404, "File not found on disk")
         return FileResponse(evidence.file_path, media_type=evidence.mime_type)
+
+    @router.get("/evidence/{evidence_id}/thumbnail")
+    async def get_evidence_thumbnail(
+        evidence_id: str,
+        width: int | None = None,
+        height: int | None = None,
+    ):
+        evidence = await repo.get_evidence(evidence_id)
+        if not evidence:
+            raise HTTPException(404, "Evidence not found")
+        if not evidence.file_path or not os.path.exists(evidence.file_path):
+            raise HTTPException(404, "File not found on disk")
+        if not context.thumbnails or not context.thumbnails._config.enabled:
+            raise HTTPException(404, "Thumbnails are disabled")
+        # Use configured defaults when dimensions are not specified
+        if width is None or height is None:
+            cfg = context.thumbnails._config
+            width = width if width is not None else cfg.max_width
+            height = height if height is not None else cfg.max_height
+
+        thumbnail_path = await asyncio.to_thread(
+            context.thumbnails.get_or_create,
+            evidence.file_path,
+            width,
+            height,
+        )
+        if not thumbnail_path:
+            raise HTTPException(404, "Thumbnail generation failed")
+
+        return FileResponse(
+            thumbnail_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
     return router

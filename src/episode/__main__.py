@@ -25,6 +25,7 @@ from episode.inventory import DeviceValidationService, InventoryService
 from episode.lifecycle import Lifecycle
 from episode.media import MediaRegistry
 from episode.media.previews import CurrentViewService
+from episode.media.thumbnails import ThumbnailService
 from episode.media.timelapse import TimelapseService
 from episode.plugins import PluginContext, PluginManager, builtin_plugin_registry
 from episode.plugins.api import register_plugins_api
@@ -42,7 +43,8 @@ class Application:
         self._plugin_reload_lock = asyncio.Lock()
         self._lifecycle = Lifecycle()
         self._bus = EventBus()
-        self._repo = Repository(config)
+        self._thumbnails = ThumbnailService(config.thumbnail)
+        self._repo = Repository(config, thumbnail_service=self._thumbnails)
         self._engine = EpisodeEngine(self._repo, self._bus, config.episode_timeout)
         self._ingress_router = IngressRouter()
         self._ingestion = IngestionService(
@@ -102,6 +104,7 @@ class Application:
             config.data_dir,
             config.snapshot_window,
             self._timelapses,
+            thumbnail_service=self._thumbnails,
             operations=self._operations,
             inventory=self._inventory,
             validator=self._validation,

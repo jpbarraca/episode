@@ -112,7 +112,7 @@ function renderTimelineSnapshot(entry, deviceNames) {
     <div class="timeline-entry-content">
       <button type="button" class="timeline-moment timeline-snapshot-moment"
           data-moment-id="${entry.id}" data-snapshot-id="${entry.item.id}">
-        <img src="${API}/evidence/${entry.item.id}/file" loading="lazy" alt="">
+        <img src="${API}/evidence/${entry.item.id}/thumbnail" loading="lazy" alt="">
         <span class="timeline-snapshot-copy">
           <strong>Snapshot</strong>
           <span>${escHtml(trunc(deviceLabel(entry.deviceId, deviceNames), 28))}</span>

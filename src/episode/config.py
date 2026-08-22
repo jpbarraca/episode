@@ -50,6 +50,15 @@ class RecordingActionConfig:
 
 
 @dataclass
+class ThumbnailConfig:
+    enabled: bool = True
+    max_width: int = 480
+    max_height: int = 320
+    quality: int = 75
+    cache_dir: str = ""
+
+
+@dataclass
 class ActionsConfig:
     snapshot: SnapshotActionConfig = field(default_factory=SnapshotActionConfig)
     recording: RecordingActionConfig = field(default_factory=RecordingActionConfig)
@@ -65,6 +74,7 @@ class EpisodeConfig:
     episode_timeout: int = 30
     snapshot_window: int = 1
     log_level: str = "INFO"
+    thumbnail: ThumbnailConfig = field(default_factory=ThumbnailConfig)
     actions: ActionsConfig = field(default_factory=ActionsConfig)
     connectors: list[ConnectorConfig] = field(default_factory=list)
     plugins: list[ExternalPluginConfig] = field(default_factory=list)
@@ -88,6 +98,10 @@ class EpisodeConfig:
                 ExternalPluginConfig(**plugin) if isinstance(plugin, dict) else plugin
                 for plugin in self.plugins
             ]
+        if isinstance(self.thumbnail, dict):
+            self.thumbnail = ThumbnailConfig(**self.thumbnail)
+        if not self.thumbnail.cache_dir:
+            self.thumbnail.cache_dir = os.path.join(self.data_dir, "thumbnails")
         plugin_ids = [plugin.id for plugin in self.plugins]
         if len(set(plugin_ids)) != len(plugin_ids):
             raise ValueError("plugin configuration contains duplicate ids")
