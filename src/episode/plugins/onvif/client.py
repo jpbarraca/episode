@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 import uuid
 import xml.etree.ElementTree as ET
@@ -10,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from lxml import etree as _lxml_etree
 
 SOAP = "http://www.w3.org/2003/05/soap-envelope"
 TT = "http://www.onvif.org/ver10/schema"
@@ -26,6 +28,8 @@ PASSWORD_DIGEST = (
 BASE64_BINARY = (
     "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ONVIFError(RuntimeError):
@@ -80,11 +84,13 @@ class ONVIFClient:
         path: str = "/onvif/device_service",
         auth_mode: str = "digest_wsse",
         timeout: float = 15,
+        relaxed_xml: bool = False,
     ):
         self.host = host
         self.username = username
         self.password = password
         self.auth_mode = auth_mode
+        self.relaxed_xml = relaxed_xml
         port_part = f":{port}" if port and port not in (80, 443) else ""
         self.device_url = f"{protocol}://{host}{port_part}{path}"
         self._clock_offset = timedelta()
@@ -153,6 +159,29 @@ class ONVIFClient:
         xml_declaration = b'<?xml version="1.0" encoding="utf-8"?>\n'
         return xml_declaration + ET.tostring(root, encoding="utf-8")
 
+    def _parse_response(self, raw: bytes):
+        try:
+            return ET.fromstring(raw)
+        except ET.ParseError as strict_error:
+            if not self.relaxed_xml:
+                raise ONVIFError("Camera returned invalid SOAP XML") from strict_error
+
+        parser = _lxml_etree.XMLParser(
+            recover=True,
+            resolve_entities=False,
+            load_dtd=False,
+            no_network=True,
+            huge_tree=False,
+        )
+        try:
+            root = _lxml_etree.fromstring(raw, parser=parser)
+        except _lxml_etree.XMLSyntaxError as recovery_error:
+            raise ONVIFError("Camera returned unrecoverable SOAP XML") from recovery_error
+        if root is None:
+            raise ONVIFError("Camera returned unrecoverable SOAP XML")
+        logger.warning("Recovered malformed ONVIF SOAP XML from %s", self.host)
+        return root
+
     async def call(
         self,
         url: str,
@@ -173,10 +202,7 @@ class ONVIFClient:
         )
         response.raise_for_status()
         raw = response.content
-        try:
-            root = ET.fromstring(raw)
-        except ET.ParseError as error:
-            raise ONVIFError("Camera returned invalid SOAP XML") from error
+        root = self._parse_response(raw)
         fault = root.find(f".//{{{SOAP}}}Fault")
         if fault is not None:
             reason = fault.findtext(f".//{{{SOAP}}}Text", "ONVIF SOAP fault")

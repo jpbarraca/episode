@@ -16,7 +16,7 @@ from episode.domain.models import Area, Device, EventState
 from episode.engine.bus import EventBus, Message
 from episode.engine.engine import EpisodeEngine
 from episode.media import CameraMedia, MediaRegistry
-from episode.plugins.onvif.client import ONVIFClient
+from episode.plugins.onvif.client import SOAP, TDS, ONVIFClient, ONVIFError
 from episode.plugins.onvif.events import ONVIFStateTracker, parse_notifications
 from episode.storage.repository import Repository
 
@@ -40,6 +40,25 @@ NOTIFICATIONS = b"""<?xml version="1.0"?>
    </tt:Data></tt:Message></wsnt:Message>
   </wsnt:NotificationMessage>
  </PullMessagesResponse></s:Body>
+</s:Envelope>"""
+
+MALFORMED_GET_SERVICES_RESPONSE = b"""<?xml version="1.0"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+ xmlns:tds="http://www.onvif.org/ver10/device/wsdl"
+ xmlns:tan="http://www.onvif.org/ver20/analytics/wsdl"
+ xmlns:tev="http://www.onvif.org/ver10/events/wsdl">
+ <s:Body><tds:GetServicesResponse>
+  <tds:Service>
+   <tds:Namespace>http://www.onvif.org/ver20/analytics/wsdl</tds:Namespace>
+   <tds:XAddr>http://192.0.2.15:8000/onvif/analytics_service</tds:XAddr>
+   <tds:Capabilities><tad:Capabilities RuleSupport="true"/></tds:Capabilities>
+  </tds:Service>
+  <tds:Service>
+   <tds:Namespace>http://www.onvif.org/ver10/events/wsdl</tds:Namespace>
+   <tds:XAddr>http://192.0.2.15:8000/onvif/event_service</tds:XAddr>
+   <tds:Capabilities><tev:Capabilities WSPullPointSupport="true"/></tds:Capabilities>
+  </tds:Service>
+ </tds:GetServicesResponse></s:Body>
 </s:Envelope>"""
 
 
@@ -66,6 +85,61 @@ async def test_ws_username_token_never_contains_plaintext_password():
     assert b"camera-secret" not in envelope
     assert b"PasswordDigest" in envelope
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_relaxed_xml_recovers_known_onvif_data_without_weakening_the_default():
+    strict = ONVIFClient("192.0.2.1", "user", "password")
+    relaxed = ONVIFClient("192.0.2.1", "user", "password", relaxed_xml=True)
+    try:
+        with pytest.raises(ONVIFError, match="invalid SOAP XML"):
+            strict._parse_response(MALFORMED_GET_SERVICES_RESPONSE)
+
+        root = relaxed._parse_response(MALFORMED_GET_SERVICES_RESPONSE)
+        services = root.findall(f".//{{{TDS}}}Service")
+
+        assert [
+            (
+                service.findtext(f"{{{TDS}}}Namespace"),
+                service.findtext(f"{{{TDS}}}XAddr"),
+            )
+            for service in services
+        ] == [
+            (
+                "http://www.onvif.org/ver20/analytics/wsdl",
+                "http://192.0.2.15:8000/onvif/analytics_service",
+            ),
+            (
+                "http://www.onvif.org/ver10/events/wsdl",
+                "http://192.0.2.15:8000/onvif/event_service",
+            ),
+        ]
+    finally:
+        await strict.close()
+        await relaxed.close()
+
+
+@pytest.mark.asyncio
+async def test_relaxed_xml_does_not_resolve_external_entities(tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("must-not-be-read", encoding="utf-8")
+    response = f"""<!DOCTYPE s:Envelope [
+<!ENTITY secret SYSTEM "{secret.as_uri()}">
+]>
+<s:Envelope xmlns:s="{SOAP}" xmlns:tds="{TDS}">
+ <s:Body><tds:GetDeviceInformationResponse>
+  <tds:Manufacturer>&secret;</tds:Manufacturer>
+ </tds:GetDeviceInformationResponse></s:Body>
+</s:Envelope>""".encode()
+    client = ONVIFClient("192.0.2.1", "user", "password", relaxed_xml=True)
+    try:
+        root = client._parse_response(response)
+        manufacturer = root.find(f".//{{{TDS}}}Manufacturer")
+
+        assert manufacturer is not None
+        assert manufacturer.text in (None, "")
+    finally:
+        await client.close()
 
 
 def test_media_registry_adds_encoded_credentials_to_discovered_rtsp_uri():

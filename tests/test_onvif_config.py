@@ -7,7 +7,7 @@ from episode.plugins.onvif.client import ONVIFDevice, ONVIFProfile
 from episode.plugins.onvif.device import ONVIFDeviceConnection, device_config
 
 
-def _device(*, events_enabled: bool = False, **overrides):
+def _device(*, events_enabled: bool = False, relaxed_xml: bool = False, **overrides):
     value = {
         "id": "camera-test",
         "name": "Test camera",
@@ -22,7 +22,10 @@ def _device(*, events_enabled: bool = False, **overrides):
                 "protocol": "http",
                 "port": 80,
                 "path": "/onvif/device_service",
-                "settings": {"events_enabled": events_enabled},
+                "settings": {
+                    "events_enabled": events_enabled,
+                    "relaxed_xml": relaxed_xml,
+                },
             },
             "video": {
                 "protocol": "rtsp",
@@ -48,6 +51,16 @@ def test_onvif_events_can_be_enabled_explicitly():
 
     assert error is None
     assert config.events_enabled is True
+
+
+def test_relaxed_xml_is_opt_in():
+    default, default_error = device_config(_device())
+    enabled, enabled_error = device_config(_device(relaxed_xml=True))
+
+    assert default_error is None
+    assert enabled_error is None
+    assert default.relaxed_xml is False
+    assert enabled.relaxed_xml is True
 
 
 def test_invalid_onvif_timeout_is_isolated_as_configuration_error():

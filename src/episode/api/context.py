@@ -7,6 +7,7 @@ from typing import Any
 from episode.api.projections import public_event
 from episode.api.runtime import OperationalView
 from episode.api.schemas import EventResponse
+from episode.api.thumbnails import ThumbnailCache
 from episode.inventory import DeviceValidationService, InventoryService
 from episode.media.previews import CurrentViewService
 from episode.media.timelapse import TimelapseService
@@ -24,6 +25,7 @@ class ApiContext:
     inventory: InventoryService | None = None
     validator: DeviceValidationService | None = None
     current_views: CurrentViewService | None = None
+    thumbnails: ThumbnailCache | None = None
 
     def __post_init__(self) -> None:
         if self.timelapses is None:

@@ -125,6 +125,7 @@ test("renders a media-first timeline with all Doorbell states and snapshots", ()
   assert.match(html, /Lock: Door1/);
   assert.match(html, /Method: Householder/);
   assert.equal((html.match(/<strong>Snapshot<\/strong>/g) || []).length, 2);
+  assert.match(html, /evidence\/snapshot-1\/thumbnail/);
   assert.match(html, /Linked to Human detected/);
   assert.match(html, /Uncorrelated evidence/);
   assert.match(html, /Detection overlay/);

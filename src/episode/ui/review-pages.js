@@ -157,7 +157,7 @@ export async function episodes(page = 1) {
                   <div class="episode-rail-track"><span></span></div>
                   <a href="#episode/${item.id}" class="episode-history-card">
                     ${covers[item.id]
-                      ? `<div class="episode-history-cover"><img src="${API}/evidence/${covers[item.id]}/file" loading="lazy" alt=""></div>`
+                      ? `<div class="episode-history-cover"><img src="${API}/evidence/${covers[item.id]}/thumbnail" loading="lazy" decoding="async" alt="" onerror="this.onerror=null;this.src='${API}/evidence/${covers[item.id]}/file'"></div>`
                       : '<div class="episode-history-cover episode-cover-placeholder"><img src="/logo.svg" alt=""><span>No snapshot</span></div>'}
                     <div class="episode-history-body">
                       <div class="episode-card-heading">

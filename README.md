@@ -41,6 +41,7 @@ self-hosters who want local, portable evidence.
 - Starts and stops configured recordings around Episode activity.
 - Reviews each Episode through a chronological Event timeline linked to its recordings and snapshots.
 - Optionally projects vendor detection regions over snapshots and recordings without modifying evidence.
+- Uses disposable presentation thumbnails in timelines and collection views without modifying original Evidence.
 - Presents chronological Episodes, active camera views, Activity, Evidence,
   Devices, and system status in a web UI.
 

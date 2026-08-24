@@ -16,9 +16,11 @@ from episode.plugins.registry import builtin_plugin_registry
 async def test_validation_reports_protocol_evidence_without_enabling_integrations(
     monkeypatch,
 ):
+    client_options = {}
+
     class FakeONVIFClient:
         def __init__(self, *args, **kwargs):
-            pass
+            client_options.update(kwargs)
 
         async def discover(self):
             return SimpleNamespace(
@@ -76,6 +78,7 @@ async def test_validation_reports_protocol_evidence_without_enabling_integration
                 protocol="http",
                 port=80,
                 path="/onvif/device_service",
+                settings={"relaxed_xml": True},
             ),
             "isapi": CapabilityConfig(protocol="http", port=80),
         },
@@ -102,6 +105,7 @@ async def test_validation_reports_protocol_evidence_without_enabling_integration
         "snapshots",
         "events",
     ]
+    assert client_options["relaxed_xml"] is True
     assert results["isapi"]["status"] == "supported"
     assert results["isapi"]["capabilities"] == ["device-information"]
     assert results["hikvision_sdk"]["status"] == "supported"
