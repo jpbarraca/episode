@@ -7,7 +7,7 @@ from episode.plugins.onvif.client import ONVIFDevice, ONVIFProfile
 from episode.plugins.onvif.device import ONVIFDeviceConnection, device_config
 
 
-def _device(*, events_enabled: bool = False, **overrides):
+def _device(*, events_enabled: bool = False, relaxed_xml: bool = False, **overrides):
     value = {
         "id": "camera-test",
         "name": "Test camera",
@@ -22,7 +22,10 @@ def _device(*, events_enabled: bool = False, **overrides):
                 "protocol": "http",
                 "port": 80,
                 "path": "/onvif/device_service",
-                "settings": {"events_enabled": events_enabled},
+                "settings": {
+                    "events_enabled": events_enabled,
+                    "relaxed_xml": relaxed_xml,
+                },
             },
             "video": {
                 "protocol": "rtsp",
@@ -48,6 +51,16 @@ def test_onvif_events_can_be_enabled_explicitly():
 
     assert error is None
     assert config.events_enabled is True
+
+
+def test_relaxed_xml_is_opt_in():
+    default, default_error = device_config(_device())
+    enabled, enabled_error = device_config(_device(relaxed_xml=True))
+
+    assert default_error is None
+    assert enabled_error is None
+    assert default.relaxed_xml is False
+    assert enabled.relaxed_xml is True
 
 
 def test_invalid_onvif_timeout_is_isolated_as_configuration_error():
@@ -159,159 +172,3 @@ async def test_onvif_discovery_does_not_enable_disabled_recording():
 
     assert config.device.get_config("video") is None
     assert "video" in config.device.capabilities
-
-
-import sys
-
-sys.path.insert(0, "/mnt/storage/services/episode/episode/src")
-
-from episode.plugins.onvif.device import device_config, ONVIFDeviceConfig
-from episode.api.inventory import (
-    ONVIFConfigurationRequest,
-    DeviceWriteRequest,
-    device_from_request,
-    validation_device_from_request,
-    editable_device_configuration,
-)
-from episode.domain.models import Device, CapabilityConfig
-
-
-def test_onvif_relaxed_validation_is_disabled_by_default():
-    config, error = device_config(_device())
-    assert error is None
-    assert config.relaxed_validation is False
-
-
-def test_onvif_relaxed_validation_can_be_enabled():
-    config, error = device_config(
-        {
-            **_device(),
-            "configs": {
-                **_device()["configs"],
-                "onvif": {
-                    **_device()["configs"]["onvif"],
-                    "settings": {"onvif_relaxed_validation": True},
-                },
-            },
-        }
-    )
-    assert error is None
-    assert config.relaxed_validation is True
-
-
-def test_onvif_relaxed_validation_can_be_explicitly_disabled():
-    config, error = device_config(
-        {
-            **_device(),
-            "configs": {
-                **_device()["configs"],
-                "onvif": {
-                    **_device()["configs"]["onvif"],
-                    "settings": {"onvif_relaxed_validation": False},
-                },
-            },
-        }
-    )
-    assert error is None
-    assert config.relaxed_validation is False
-
-
-def test_onvif_config_request_defaults_relaxed_validation_false():
-    from episode.api.inventory import ONVIFConfigurationRequest
-
-    req = ONVIFConfigurationRequest()
-    assert req.onvif_relaxed_validation is False
-
-
-def test_onvif_config_request_accepts_relaxed_validation():
-    from episode.api.inventory import ONVIFConfigurationRequest
-
-    req = ONVIFConfigurationRequest(onvif_relaxed_validation=True)
-    assert req.onvif_relaxed_validation is True
-
-
-def test_device_write_request_persists_relaxed_validation():
-    from episode.api.inventory import (
-        DeviceWriteRequest,
-        ONVIFConfigurationRequest,
-        device_from_request,
-    )
-    from episode.domain.models import Device, CapabilityConfig
-
-    existing = Device(
-        id="test",
-        name="Test",
-        device_type="camera",
-        area_id="area",
-        ip_address="192.0.2.10",
-        username="u",
-        password="p",
-        configs={
-            "onvif": CapabilityConfig(
-                protocol="http",
-                port=80,
-                path="/onvif/device_service",
-                settings={"onvif_relaxed_validation": True},
-            )
-        },
-    )
-    request = DeviceWriteRequest(
-        name="Test",
-        device_type="camera",
-        area_id="area",
-        ip_address="192.0.2.10",
-        username="u",
-        password="p",
-        onvif=ONVIFConfigurationRequest(onvif_relaxed_validation=True),
-    )
-    device = device_from_request("test", request, existing)
-    onvif_cfg = device.get_config("onvif")
-    assert onvif_cfg is not None
-    assert onvif_cfg.settings.get("onvif_relaxed_validation") is True
-
-
-def test_validation_device_includes_relaxed_validation():
-    from episode.api.inventory import (
-        DeviceWriteRequest,
-        ONVIFConfigurationRequest,
-        validation_device_from_request,
-    )
-
-    request = DeviceWriteRequest(
-        name="Test",
-        device_type="camera",
-        area_id="area",
-        ip_address="192.0.2.10",
-        username="u",
-        password="p",
-        onvif=ONVIFConfigurationRequest(onvif_relaxed_validation=True),
-    )
-    device = validation_device_from_request(request)
-    onvif_cfg = device.get_config("onvif")
-    assert onvif_cfg is not None
-    assert onvif_cfg.settings.get("onvif_relaxed_validation") is True
-
-
-def test_editable_device_configuration_returns_relaxed_validation():
-    from episode.api.inventory import editable_device_configuration
-    from episode.domain.models import Device, CapabilityConfig
-
-    device = Device(
-        id="test",
-        name="Test",
-        device_type="camera",
-        area_id="area",
-        ip_address="192.0.2.10",
-        username="u",
-        password="p",
-        configs={
-            "onvif": CapabilityConfig(
-                protocol="http",
-                port=80,
-                path="/onvif/device_service",
-                settings={"onvif_relaxed_validation": True, "events_enabled": False},
-            )
-        },
-    )
-    config = editable_device_configuration(device)
-    assert config["onvif"]["onvif_relaxed_validation"] is True

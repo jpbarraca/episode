@@ -118,6 +118,9 @@ The original vendor payload remains immutable and UI overlays remain separate.
   password, and authentication mode. Hikvision should normally use the combined
   Digest and WS-Username Token option.
 - **Authentication fails intermittently:** check NTP and the camera time zone.
+- **Validation reports malformed SOAP XML:** enable **Tolerate malformed SOAP
+  XML** for that Device and run **Validate and discover** again. This opt-in
+  compatibility fallback leaves the original SOAP response unchanged.
 - **Connected but no Events:** enable a detection rule on the camera and enable
   **Receive ONVIF Events** on the Device. ONVIF exposes configured camera rules;
   it does not create them.
