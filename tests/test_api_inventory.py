@@ -82,7 +82,7 @@ async def test_area_and_device_crud_keeps_credentials_write_only(inventory_api):
             "episode_policy": {
                 "activity_window_seconds": 60,
             },
-            "onvif": {"enabled": True, "events_enabled": True},
+            "onvif": {"enabled": True, "events_enabled": True, "relaxed_xml": True},
             "isapi": {"enabled": False},
         },
     )
@@ -93,6 +93,8 @@ async def test_area_and_device_crud_keeps_credentials_write_only(inventory_api):
     assert stored.activity_window_seconds == 60
     assert "isapi" not in stored.configs
     assert stored.get_config("onvif").settings["events_enabled"] is True
+    assert stored.get_config("onvif").settings["relaxed_xml"] is True
+    assert update.json()["configuration"]["onvif"]["relaxed_xml"] is True
 
 
 @pytest.mark.asyncio
