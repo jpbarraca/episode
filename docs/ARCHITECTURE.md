@@ -247,6 +247,14 @@ annotated Events can update its region. A gap or explicit inactive Event closes
 the track. This inference is not written back to Events, Evidence, manifests, or
 raw artifacts.
 
+Collection views use fixed-profile JPEG thumbnails generated from immutable
+Evidence on demand. These files live only below `data/cache/thumbnails`, are
+keyed by Evidence checksum—or stable Evidence ID when a legacy row has no
+checksum—and presentation profile. They can be discarded and regenerated at
+any time. The thumbnail cache has no storage
+repository dependency and cannot mutate or delete Evidence, Raw Artifacts,
+receipts, manifests, journals, or Episode bundle contents.
+
 Recordings remain active for the Episode lifecycle and are stored as sequential,
 immutable segments. A shared `recording_session_id` and ordered `segment_index`
 identify chunks from one continuous recording action without relying on filename

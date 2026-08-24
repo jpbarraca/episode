@@ -104,6 +104,7 @@ def test_public_api_has_no_duplicate_routes_and_keeps_expected_surface():
         "/api/v1/evidence/{evidence_id}",
         "/api/v1/evidence/{evidence_id}/closest-event",
         "/api/v1/evidence/{evidence_id}/file",
+        "/api/v1/evidence/{evidence_id}/thumbnail",
     }
 
 

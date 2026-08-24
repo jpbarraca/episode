@@ -79,6 +79,12 @@ Binary and media endpoints return their native content type. A successful
 artifact response is the preserved file; JSON errors are returned only when the
 requested resource or file cannot be served.
 
+`/evidence/{evidence_id}/file` serves the preserved Evidence bytes.
+`/evidence/{evidence_id}/thumbnail` serves a fixed-size JPEG derived on demand
+for collection and timeline presentation. Thumbnails are disposable cache
+entries below `data/cache/thumbnails`; they are not Raw Artifacts, Evidence, or
+Episode bundle contents. Removing the cache never removes or changes Evidence.
+
 Active Episodes expose `/episodes/{episode_id}/current-views` as a small
 operational projection of Devices currently recording that Episode. Snapshot
 URLs returned by that collection are short-lived views fetched through Episode;

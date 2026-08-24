@@ -99,4 +99,21 @@ def evidence_router(context: ApiContext) -> APIRouter:
             raise HTTPException(404, "File not found on disk")
         return FileResponse(evidence.file_path, media_type=evidence.mime_type)
 
+    @router.get("/evidence/{evidence_id}/thumbnail")
+    async def serve_evidence_thumbnail(evidence_id: str):
+        evidence = await repo.get_evidence(evidence_id)
+        if not evidence:
+            raise HTTPException(404, "Evidence not found")
+        if not context.thumbnails:
+            raise HTTPException(404, "Thumbnail not available")
+
+        thumbnail_path = await context.thumbnails.get_or_create(evidence)
+        if not thumbnail_path:
+            raise HTTPException(404, "Thumbnail not available")
+        return FileResponse(
+            thumbnail_path,
+            media_type="image/jpeg",
+            headers={"Cache-Control": "private, max-age=86400"},
+        )
+
     return router
