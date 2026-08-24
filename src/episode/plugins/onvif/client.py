@@ -118,7 +118,7 @@ class ONVIFClient:
         self,
         operation: ET.Element,
         *,
-        authenticated: bool = True,
+        authenticated: bool,
         soap_action: str | None = None,
         destination: str | None = None,
         message_id: str | None = None,
@@ -156,8 +156,7 @@ class ONVIFClient:
             ).text = base64.b64encode(nonce).decode()
             ET.SubElement(token, f"{{{WSU}}}Created").text = created
         ET.SubElement(root, f"{{{SOAP}}}Body").append(operation)
-        xml_declaration = b'<?xml version="1.0" encoding="utf-8"?>\n'
-        return xml_declaration + ET.tostring(root, encoding="utf-8")
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def _parse_response(self, raw: bytes):
         try:
