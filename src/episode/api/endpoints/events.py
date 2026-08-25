@@ -107,6 +107,9 @@ def events_router(context: ApiContext) -> APIRouter:
         event = await repo.get_event(event_id)
         if not event:
             raise HTTPException(404, "Event not found")
+        visual_evidence = event.metadata.get("visual_evidence")
+        if isinstance(visual_evidence, dict) and visual_evidence.get("availability") == "expired":
+            raise HTTPException(410, "Event picture expired under the retention policy")
         picture = event_embedded_picture(event)
         raw_path = event.raw_payload_path
         if not picture or not raw_path or not os.path.isfile(raw_path):

@@ -78,6 +78,7 @@ def test_public_api_has_no_duplicate_routes_and_keeps_expected_surface():
         "/api/v1/status",
         "/api/v1/diagnostics",
         "/api/v1/diagnostics/export",
+        "/api/v1/settings/retention",
         "/api/v1/areas",
         "/api/v1/areas/{area_id}",
         "/api/v1/devices",
@@ -158,6 +159,16 @@ def test_openapi_declares_success_and_error_response_models():
     assert event_errors["404"]["content"]["application/json"]["schema"]["$ref"].endswith(
         "/ApiErrorResponse"
     )
+
+
+def test_closest_event_contract_represents_an_absent_association():
+    schema = create_api(object()).openapi()
+    event_options = schema["components"]["schemas"]["ClosestEventResponse"]["properties"]["event"][
+        "anyOf"
+    ]
+
+    assert {"type": "null"} in event_options
+    assert any(option.get("$ref", "").endswith("/EventResponse") for option in event_options)
 
 
 @pytest.mark.asyncio

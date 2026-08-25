@@ -18,6 +18,7 @@ from episode.api.thumbnails import ThumbnailCache
 from episode.inventory import DeviceValidationService, InventoryService
 from episode.media.previews import CurrentViewService
 from episode.media.timelapse import TimelapseService
+from episode.retention import RetentionService
 
 
 def create_api(
@@ -29,6 +30,8 @@ def create_api(
     inventory: InventoryService | None = None,
     validator: DeviceValidationService | None = None,
     current_views: CurrentViewService | None = None,
+    thumbnail_cache: ThumbnailCache | None = None,
+    retention: RetentionService | None = None,
 ) -> FastAPI:
     app = FastAPI(
         title="Episode",
@@ -44,7 +47,9 @@ def create_api(
         inventory=inventory,
         validator=validator,
         current_views=current_views,
-        thumbnails=ThumbnailCache(Path(data_dir) / "cache" / "thumbnails") if data_dir else None,
+        thumbnails=thumbnail_cache
+        or (ThumbnailCache(Path(data_dir) / "cache" / "thumbnails") if data_dir else None),
+        retention=retention,
     )
     install_error_handlers(app)
 

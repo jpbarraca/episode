@@ -85,6 +85,19 @@ for collection and timeline presentation. Thumbnails are disposable cache
 entries below `data/cache/thumbnails`; they are not Raw Artifacts, Evidence, or
 Episode bundle contents. Removing the cache never removes or changes Evidence.
 
+`/evidence/{evidence_id}/closest-event` is an optional annotation lookup. When
+the Evidence exists but no Event falls inside the configured snapshot window,
+it returns `200` with `event`, `bounding_box`, and `target_type` set to `null`.
+A missing Evidence resource still returns `404`.
+
+Evidence resources expose `availability`, `expired_at`, and
+`expiration_reason`. Retention-expired Evidence remains as a tombstone in JSON
+and Episode manifests, while its file and thumbnail endpoints return `410`.
+
+`GET /settings/retention` returns the global visual Evidence period and cleanup
+status. `PUT /settings/retention` accepts `retention_days` from 1 through 3650;
+the default is 30. Updating the value immediately runs one cleanup pass.
+
 Active Episodes expose `/episodes/{episode_id}/current-views` as a small
 operational projection of Devices currently recording that Episode. Snapshot
 URLs returned by that collection are short-lived views fetched through Episode;

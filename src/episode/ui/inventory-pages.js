@@ -1,11 +1,11 @@
-import { API, api } from "./api.js?v=3";
+import { API, api, apiRequest } from "./api.js?v=3";
 import {
   detailMetric,
   eventSourceBadges,
   pageHeader,
   sectionHeading,
 } from "./components.js?v=4";
-import { notify } from "./dialogs.js?v=1";
+import { confirmDialog, notify } from "./dialogs.js?v=1";
 import { escHtml } from "./dom.js";
 import { fmtBytes, fmtShort, plural, titleCase } from "./format.js?v=4";
 import { eventTitle } from "./timeline.js?v=5";
@@ -107,6 +107,23 @@ window.deleteDevice = id => {
       await devices();
     });
   }
+};
+
+window.saveRetention = form => {
+  const retentionDays = Number(new FormData(form).get("retention_days"));
+  confirmDialog({
+    title: "Change visual Evidence retention?",
+    message: "Changing retention may permanently delete older visual Evidence during the next cleanup.",
+    confirmLabel: "Save retention",
+    onConfirm: async () => {
+      await apiRequest("/settings/retention", {
+        method: "PUT",
+        body: { retention_days: retentionDays },
+      });
+      notify("Visual Evidence retention updated");
+      await systemStatus();
+    },
+  });
 };
 
 export async function devices() {
@@ -295,7 +312,10 @@ export async function areas() {
 export async function systemStatus() {
   showLoading();
   try {
-    const diagnostics = await api("/diagnostics");
+    const [diagnostics, retention] = await Promise.all([
+      api("/diagnostics"),
+      api("/settings/retention"),
+    ]);
     const status = diagnostics.status;
     const services = diagnostics.services.map(service => ({
       ...service,
@@ -318,6 +338,20 @@ export async function systemStatus() {
         <div><dt>Episode data</dt><dd>${fmtBytes(diagnostics.storage.data_bytes)}</dd></div>
         <div><dt>Filesystem available</dt><dd>${fmtBytes(diagnostics.storage.filesystem_free_bytes)}</dd></div>
       </dl>
+      <section class="section system-retention">
+        <h3>Storage and retention</h3>
+        <form class="form-grid system-retention-form" onsubmit="saveRetention(this); return false">
+          <label class="field">
+            <span>Visual Evidence retention</span>
+            <input name="retention_days" type="number" min="1" max="3650" required value="${retention.retention_days}">
+            <small>Days before Episode deletes managed video, snapshots, embedded images, and visual derivatives.</small>
+          </label>
+          <div class="field-span configuration-note">${escHtml(retention.notice)}</div>
+          <div class="field-span">
+            <button type="submit" class="button button-primary">Save retention</button>
+          </div>
+        </form>
+      </section>
       <div class="section"><h3>Core services</h3>${renderIntegrationRows(services, true)}</div>
       <div class="section"><h3>Integrations (${diagnostics.integrations.length})</h3>${renderIntegrationRows(diagnostics.integrations, true)}</div>`);
   } catch (error) {

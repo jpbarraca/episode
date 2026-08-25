@@ -600,8 +600,9 @@ export async function evidenceDetail(id) {
     const isVideo = item.mime_type?.startsWith("video/");
     const isImage = item.mime_type?.startsWith("image/");
     const isText = item.mime_type?.startsWith("text/") || item.mime_type === "application/xml";
+    const expired = item.availability === "expired";
     const associationPromise = (async () => {
-      if (isImage && item.episode_id) {
+      if (!expired && isImage && item.episode_id) {
         try {
           const closest = await api("/evidence/" + id + "/closest-event");
           if (closest?.event) return closest;
@@ -619,10 +620,10 @@ export async function evidenceDetail(id) {
         return null;
       }
     })();
-    const peersPromise = (isImage || isVideo) && item.episode_id
+    const peersPromise = !expired && (isImage || isVideo) && item.episode_id
       ? apiAll("/episodes/" + item.episode_id + "/evidence")
       : Promise.resolve([item]);
-    const textPromise = isText
+    const textPromise = !expired && isText
       ? apiBlob("/evidence/" + item.id + "/file").then(blob => blob.text()).catch(() => "")
       : Promise.resolve("");
     const [devices, areas, association, peers, textContent] = await Promise.all([
@@ -642,7 +643,9 @@ export async function evidenceDetail(id) {
     const peerIndex = peerMedia.findIndex(evidence => evidence.id === item.id);
 
     let media = "";
-    if (isVideo) {
+    if (expired) {
+      media = `<div class="evidence-detail-file"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
+    } else if (isVideo) {
       media = `<video src="${API}/evidence/${item.id}/file" controls preload="metadata"></video>`;
     } else if (isImage) {
       media = `<div class="review-media-image">
@@ -713,17 +716,19 @@ export async function evidenceDetail(id) {
       <section class="review-media-card evidence-detail-media section">
         ${sectionHeading(
           "evidence",
-          "Preserved artifact",
-          item.original_filename || item.mime_type || "Original filename unavailable",
+          expired ? "Expired artifact" : "Preserved artifact",
+          expired
+            ? "Visual Evidence expired under the retention policy"
+            : item.original_filename || item.mime_type || "Original filename unavailable",
           box ? `<label class="review-overlay-control"><input type="checkbox" checked onchange="document.getElementById('evidence-bbox-overlay').style.display=this.checked?'block':'none'"> Detection overlay</label>` : "",
         )}
         <div class="review-media-frame">${media}</div>
         <footer class="review-media-footer">
-          <span>${item.sha256 ? "SHA-256 fingerprint recorded" : "No integrity fingerprint recorded"}</span>
-          <nav>
+          <span>${expired ? `Expired ${fmt(item.expired_at)}` : item.sha256 ? "SHA-256 fingerprint recorded" : "No integrity fingerprint recorded"}</span>
+          ${expired ? "" : `<nav>
             ${peerIndex >= 0 && (isImage || isVideo) ? '<button id="evidence-open-viewer" type="button">Open viewer</button>' : ""}
             <a href="${API}/evidence/${item.id}/file" download>Download file</a>
-          </nav>
+          </nav>`}
         </footer>
       </section>
       ${associationHtml}

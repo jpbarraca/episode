@@ -243,6 +243,15 @@
 }
 .field input:focus,
 .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); outline: none; }
+
+.system-retention { margin-top: 2rem; }
+.system-retention-form {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  max-width: 42rem;
+}
+.system-retention-form .field { width: min(100%, 12rem); }
 .toggle-row { align-items: flex-start; cursor: pointer; display: flex; gap: 0.65rem; }
 .toggle-row input { accent-color: var(--accent); flex: 0 0 auto; margin-top: 0.15rem; }
 .toggle-row span { display: flex; flex-direction: column; gap: 0.12rem; }

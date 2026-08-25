@@ -139,10 +139,17 @@ class EpisodeBundleProjector:
                     "area_id": item.area_id,
                     "event_id": item.event_id,
                     "artifact_id": item.artifact_id,
-                    "file": relative_bundle_path(
-                        self._data_dir,
-                        episode_id,
-                        item.file_path,
+                    "availability": item.availability,
+                    "expired_at": _utc_iso(item.expired_at),
+                    "expiration_reason": item.expiration_reason,
+                    "file": (
+                        relative_bundle_path(
+                            self._data_dir,
+                            episode_id,
+                            item.file_path,
+                        )
+                        if item.availability == "available"
+                        else None
                     ),
                     "mime_type": item.mime_type,
                     "original_filename": item.original_filename,

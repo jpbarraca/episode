@@ -12,6 +12,7 @@ from episode import __version__
 from episode.actions.snapshot import SnapshotEngine
 from episode.api.routes import create_api
 from episode.api.runtime import OperationalView
+from episode.api.thumbnails import ThumbnailCache
 from episode.config import EpisodeConfig, load_config
 from episode.connectors.base import ManagedConnector
 from episode.connectors.event_api import EventAPIConnector
@@ -31,6 +32,7 @@ from episode.plugins.api import register_plugins_api
 from episode.plugins.deliveries import RawPluginDeliveryStore
 from episode.plugins.external import discover_external_plugins
 from episode.recording.engine import RecordingEngine
+from episode.retention import RetentionService
 from episode.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
@@ -61,6 +63,13 @@ class Application:
             segment_seconds=config.actions.recording.segment_seconds,
             media=self._media,
         )
+        self._thumbnails = ThumbnailCache(Path(config.data_dir) / "cache" / "thumbnails")
+        self._retention = RetentionService(
+            self._repo,
+            config.data_dir,
+            self._thumbnails,
+            active_paths=self._recorder.active_file_paths,
+        )
         self._snapshotter = SnapshotEngine(self._bus, self._media, config.data_dir)
         self._current_views = CurrentViewService(self._media, self._recorder)
         self._configured_connector_types = {
@@ -86,6 +95,7 @@ class Application:
             engine_status=self._engine.status,
             recorder_status=self._recorder.status,
             snapshot_status=self._snapshotter.status,
+            retention_status=self._retention.status,
             connector_statuses=lambda: [connector.status() for connector in self._connectors],
             plugin_statuses=self._plugins.statuses,
             snapshots_enabled=config.actions.snapshot.enabled,
@@ -106,6 +116,8 @@ class Application:
             inventory=self._inventory,
             validator=self._validation,
             current_views=self._current_views,
+            thumbnail_cache=self._thumbnails,
+            retention=self._retention,
         )
         register_plugins_api(self._fastapi_app, self._plugins)
 
@@ -161,6 +173,14 @@ class Application:
             self._recorder.start,
             self._recorder.stop,
         )
+        await self._recorder.recover_interrupted_recordings()
+
+        logger.info("Starting visual Evidence retention...")
+        await self._lifecycle.start(
+            "Visual Evidence retention",
+            self._retention.start,
+            self._retention.stop,
+        )
 
         if self._config.actions.snapshot.enabled:
             logger.info("Starting Snapshot Engine...")
@@ -178,6 +198,9 @@ class Application:
             self._plugins.start,
             self._plugins.stop,
         )
+
+        logger.info("Resuming capture for persisted active Episodes...")
+        await self._recorder.resume_active_episodes()
 
         logger.info("Starting connectors...")
 

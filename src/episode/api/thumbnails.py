@@ -39,6 +39,15 @@ class ThumbnailCache:
                 return str(cache_path)
             return await self._generate(source, cache_path)
 
+    async def discard(self, evidence: Evidence) -> None:
+        key = self._cache_key(evidence)
+        async with self._locks[key]:
+            try:
+                (self._cache_dir / f"{key}.jpg").unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not remove thumbnail for Evidence %s", evidence.id)
+                raise
+
     @staticmethod
     def _is_supported(evidence: Evidence) -> bool:
         return evidence.mime_type.startswith(("image/", "video/"))

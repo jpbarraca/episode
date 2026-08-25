@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Response
+from fastapi import APIRouter, HTTPException, Response
 
 from episode import __version__
 from episode.api.context import ApiContext
@@ -14,12 +14,20 @@ from episode.api.schemas import (
     DiagnosticsExportResponse,
     DiagnosticsResponse,
     HealthResponse,
+    RetentionSettingsResponse,
+    RetentionSettingsUpdate,
     SystemStatusResponse,
 )
 
 _SENSITIVE_KEY = re.compile(
     r"(^|[_-])(password|passwd|secret|api[_-]?key|authorization|cookie|credentials?|private[_-]?key)([_-]|$)",
     re.IGNORECASE,
+)
+
+_RETENTION_NOTICE = (
+    "Episode automatically deletes visual Evidence older than the selected period. "
+    "Retention requirements vary by jurisdiction and use case. You are responsible "
+    "for choosing an appropriate period and managing exported or externally stored copies."
 )
 
 
@@ -107,6 +115,10 @@ def system_router(context: ApiContext) -> APIRouter:
             else {"status": current_status(), "services": [], "integrations": []}
         )
         diagnostics["storage"] = await asyncio.to_thread(_storage_summary, context.data_dir)
+        if context.retention:
+            retention = context.retention.status()
+            retention["retention_days"] = await context.retention.get_retention_days()
+            diagnostics["retention"] = retention
         return _sanitize(diagnostics, context.data_dir)
 
     @router.get("/health", response_model=HealthResponse)
@@ -116,6 +128,28 @@ def system_router(context: ApiContext) -> APIRouter:
     @router.get("/api/v1/status", response_model=SystemStatusResponse)
     async def system_status():
         return current_status()
+
+    @router.get(
+        "/api/v1/settings/retention",
+        response_model=RetentionSettingsResponse,
+    )
+    async def retention_settings():
+        if not context.retention:
+            raise HTTPException(503, "Retention service is unavailable")
+        status = context.retention.status()
+        status["retention_days"] = await context.retention.get_retention_days()
+        return {**status, "notice": _RETENTION_NOTICE}
+
+    @router.put(
+        "/api/v1/settings/retention",
+        response_model=RetentionSettingsResponse,
+    )
+    async def update_retention_settings(request: RetentionSettingsUpdate):
+        if not context.retention:
+            raise HTTPException(503, "Retention service is unavailable")
+        await context.retention.set_retention_days(request.retention_days)
+        status = context.retention.status()
+        return {**status, "notice": _RETENTION_NOTICE}
 
     @router.get("/api/v1/diagnostics", response_model=DiagnosticsResponse)
     async def diagnostics():

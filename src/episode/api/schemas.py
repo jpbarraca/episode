@@ -118,11 +118,26 @@ class StorageResponse(ApiModel):
     filesystem_free_bytes: int | None = None
 
 
+class RetentionSettingsUpdate(ApiModel):
+    retention_days: int = Field(ge=1, le=3650)
+
+
+class RetentionSettingsResponse(ApiModel):
+    retention_days: int
+    notice: str
+    state: OperationalState
+    last_cleanup_at: datetime | None = None
+    expired_count: int = 0
+    failure_count: int = 0
+    last_error: str | None = None
+
+
 class DiagnosticsResponse(ApiModel):
     status: SystemStatusResponse
     services: list[ServiceResponse]
     integrations: list[IntegrationResponse]
     storage: StorageResponse = Field(default_factory=StorageResponse)
+    retention: dict[str, Any] = Field(default_factory=dict)
 
 
 class DiagnosticsExportResponse(ApiModel):
@@ -190,6 +205,9 @@ class EvidenceResponse(ApiModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     event_id: str | None
     episode_id: str | None
+    availability: Literal["available", "expired"] = "available"
+    expired_at: datetime | None = None
+    expiration_reason: str | None = None
 
 
 class IngestionReceiptResponse(ApiModel):
@@ -218,6 +236,6 @@ class ClosestSnapshotResponse(ApiModel):
 
 
 class ClosestEventResponse(ApiModel):
-    event: EventResponse
-    bounding_box: dict[str, float] | None
-    target_type: str | None
+    event: EventResponse | None = None
+    bounding_box: dict[str, float] | None = None
+    target_type: str | None = None

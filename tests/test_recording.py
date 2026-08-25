@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
 from episode.config import EpisodeConfig
-from episode.domain.models import Area, CapabilityConfig, Device, Episode, EpisodeState, EventState
+from episode.domain.models import (
+    Area,
+    CapabilityConfig,
+    Device,
+    Episode,
+    EpisodeState,
+    Event,
+    EventState,
+)
 from episode.engine.bus import EventBus, Message
 from episode.engine.engine import EpisodeEngine
 from episode.recording.engine import RecordingEngine
@@ -487,6 +496,224 @@ async def test_graceful_stop_finalizes_active_recording_segment(repo, bus, confi
     assert not os.path.exists(f"{output_path}.part")
     assert published[0]["metadata"]["recording_session_id"]
     assert published[0]["metadata"]["segment_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multicamera_shutdown_signals_all_processes_before_waiting(
+    repo, bus, config, monkeypatch
+):
+    recorder = RecordingEngine(repo, bus, config.data_dir, segment_seconds=60)
+    all_terminated = asyncio.Event()
+    processes = {}
+    published = []
+
+    class ActiveProcess:
+        def __init__(self, device_id):
+            self.device_id = device_id
+            self.returncode = None
+            self.killed = False
+            self.waited_after_all_signals = False
+
+        def terminate(self):
+            self.returncode = 0
+            if all(process.returncode is not None for process in processes.values()):
+                all_terminated.set()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            all_terminated.set()
+
+        async def wait(self):
+            await all_terminated.wait()
+            self.waited_after_all_signals = all(
+                process.returncode is not None for process in processes.values()
+            )
+            return self.returncode
+
+    async def start_ffmpeg(*args, **kwargs):
+        working_path = args[-1].replace("%06d", "000000")
+        device_id = "camera-a" if "camera-a" in working_path else "camera-b"
+        process = ActiveProcess(device_id)
+        processes[device_id] = process
+        os.makedirs(os.path.dirname(working_path), exist_ok=True)
+        with open(working_path, "wb") as segment:
+            segment.write(b"video" * 1024)
+        return process
+
+    async def valid_video(path):
+        return True
+
+    async def capture_evidence(message):
+        published.append(message.data["evidence"])
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", start_ffmpeg)
+    monkeypatch.setattr(recorder, "_has_video_stream", valid_video)
+    bus.subscribe("evidence.received", capture_evidence)
+    await recorder.start()
+    await recorder._start_recording(
+        "episode-1",
+        _video_device("camera-a", "area-1", "on_episode"),
+        "rtsp://camera-a/stream",
+    )
+    await recorder._start_recording(
+        "episode-1",
+        _video_device("camera-b", "area-1", "on_episode"),
+        "rtsp://camera-b/stream",
+    )
+    while len(processes) < 2:
+        await asyncio.sleep(0)
+
+    await asyncio.wait_for(recorder.stop(), timeout=1)
+
+    assert set(processes) == {"camera-a", "camera-b"}
+    assert all(process.waited_after_all_signals for process in processes.values())
+    assert not any(process.killed for process in processes.values())
+    assert len(published) == 2
+
+
+@pytest.mark.asyncio
+async def test_startup_reconciles_playable_and_invalid_recording_partials(
+    repo, bus, config, monkeypatch
+):
+    await repo.initialize()
+    await _add_areas(repo, "area-1")
+    await repo.upsert_device(_video_device("camera-x", "area-1", "on_event"))
+    episode = Episode(
+        id="episode-1",
+        primary_area_id="area-1",
+        state=EpisodeState.CLOSED,
+    )
+    await repo.create_episode(episode)
+    recordings_dir = os.path.join(config.data_dir, "episodes", episode.id, "recordings")
+    os.makedirs(recordings_dir, exist_ok=True)
+    valid_part = os.path.join(
+        recordings_dir,
+        "rec_camera-x_20260824_120000_000000_aaaaaaaaaaaa_000000.mp4.part",
+    )
+    invalid_part = os.path.join(
+        recordings_dir,
+        "rec_camera-x_20260824_120001_000000_bbbbbbbbbbbb_000000.mp4.part",
+    )
+    for path in (valid_part, invalid_part):
+        with open(path, "wb") as segment:
+            segment.write(b"video" * 1024)
+
+    async def valid_video(path):
+        return path == valid_part
+
+    monkeypatch.setattr(
+        RecordingEngine,
+        "_has_video_stream",
+        lambda self, path: valid_video(path),
+    )
+    engine = EpisodeEngine(repo, bus, timeout=config.episode_timeout)
+    recorder = RecordingEngine(repo, bus, config.data_dir)
+    await engine.start()
+    await recorder.start()
+    await recorder.recover_interrupted_recordings()
+
+    evidence = await repo.list_evidence(episode_id=episode.id, limit=10)
+    by_type = {item.evidence_type: item for item in evidence}
+    assert set(by_type) == {"recording", "incomplete_recording"}
+    assert os.path.exists(by_type["recording"].file_path)
+    assert by_type["recording"].metadata["recording_session_id"] == "aaaaaaaaaaaa"
+    assert os.path.exists(by_type["incomplete_recording"].file_path)
+    assert by_type["incomplete_recording"].metadata["reason"] == "startup_recovery"
+    assert not os.path.exists(valid_part)
+    assert not os.path.exists(invalid_part)
+
+    journal_path = os.path.join(config.data_dir, "episodes", episode.id, "journal.ndjson")
+    with open(journal_path, encoding="utf-8") as journal:
+        journal_types = [json.loads(line)["type"] for line in journal]
+    assert "recording.recovered" in journal_types
+    assert "recording.incomplete" in journal_types
+
+    await recorder.stop()
+    await engine.stop()
+    await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_persisted_active_episode_resumes_all_reconstructed_targets(repo, bus, config):
+    await repo.initialize()
+    await _add_areas(repo, "area-1")
+    source = _video_device("camera-a", "area-1", "on_event")
+    peer = _video_device("camera-b", "area-1", "on_episode")
+    await repo.upsert_device(source)
+    await repo.upsert_device(peer)
+    now = _now()
+    episode = Episode(
+        id="episode-1",
+        primary_area_id="area-1",
+        start_time=now,
+        last_event_time=now,
+        last_activity_at=now,
+        minimum_end_at=now + timedelta(seconds=60),
+        state=EpisodeState.ACTIVE,
+    )
+    await repo.create_episode(episode)
+    await repo.create_event(
+        Event(
+            device_id=source.id,
+            area_id=source.area_id,
+            timestamp=now,
+            event_type="motion_detection",
+            event_state=EventState.ACTIVE,
+            source="test",
+            episode_id=episode.id,
+        )
+    )
+    recorder = RecordingEngine(repo, bus, config.data_dir)
+    resumed = []
+
+    async def start_recording(episode_id, device, stream_url):
+        resumed.append((episode_id, device.id, stream_url))
+        recorder._recordings[(episode_id, device.id)] = SimpleNamespace(
+            episode_id=episode_id,
+            device_id=device.id,
+            session_id=f"session-{device.id}",
+        )
+
+    recorder._start_recording = start_recording
+    await recorder.start()
+    await recorder.resume_active_episodes()
+
+    assert {(episode_id, device_id) for episode_id, device_id, _url in resumed} == {
+        (episode.id, source.id),
+        (episode.id, peer.id),
+    }
+
+    recorder._recordings.clear()
+    await recorder.stop()
+    await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_engine_start_closes_expired_persisted_episode_before_resume(repo, bus, config):
+    await repo.initialize()
+    await _add_areas(repo, "area-1")
+    now = _now()
+    episode = Episode(
+        id="expired-episode",
+        primary_area_id="area-1",
+        start_time=now - timedelta(minutes=2),
+        last_event_time=now - timedelta(minutes=2),
+        last_activity_at=now - timedelta(minutes=2),
+        minimum_end_at=now - timedelta(minutes=1),
+        state=EpisodeState.ACTIVE,
+    )
+    await repo.create_episode(episode)
+    engine = EpisodeEngine(repo, bus, timeout=config.episode_timeout)
+
+    await engine.start()
+
+    persisted = await repo.get_episode(episode.id)
+    assert persisted.state == EpisodeState.CLOSED
+    assert persisted.end_time is not None
+
+    await engine.stop()
+    await repo.close()
 
 
 @pytest.mark.asyncio

@@ -125,7 +125,10 @@ async def reconcile_episode_paths(
            JOIN ingestion_receipts r ON r.artifact_id = a.id
            LEFT JOIN events ev ON ev.id = r.event_id
            LEFT JOIN evidence e ON e.id = r.evidence_id
+           LEFT JOIN evidence_expirations x ON x.evidence_id = e.id
            WHERE COALESCE(r.episode_id, ev.episode_id, e.episode_id) IS NOT NULL
+             AND a.file_path NOT LIKE 'expired:%'
+             AND x.evidence_id IS NULL
            ORDER BY r.received_at ASC"""
     )
     repaired_artifacts: set[str] = set()
@@ -164,7 +167,8 @@ async def reconcile_episode_paths(
                   a.sha256 AS artifact_sha256
            FROM evidence e
            LEFT JOIN raw_artifacts a ON a.id = e.artifact_id
-           WHERE e.episode_id IS NOT NULL"""
+           LEFT JOIN evidence_expirations x ON x.evidence_id = e.id
+           WHERE e.episode_id IS NOT NULL AND x.evidence_id IS NULL"""
     )
     for row in evidence_rows:
         recorded = row["artifact_path"] or row["file_path"]

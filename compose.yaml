@@ -20,6 +20,7 @@ services:
       - ./episode.json:/app/config.json:ro
       - ./plugins:/opt/episode/plugins:ro
     restart: unless-stopped
+    stop_grace_period: 30s
     security_opt:
       - no-new-privileges:true
     healthcheck:

@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS devices (
     enabled INTEGER NOT NULL DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS system_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS raw_artifacts (
     id TEXT PRIMARY KEY,
     artifact_type TEXT NOT NULL,
@@ -80,6 +86,12 @@ CREATE TABLE IF NOT EXISTS evidence (
     metadata TEXT NOT NULL DEFAULT '{}',
     event_id TEXT REFERENCES events(id),
     episode_id TEXT REFERENCES episodes(id)
+);
+
+CREATE TABLE IF NOT EXISTS evidence_expirations (
+    evidence_id TEXT PRIMARY KEY REFERENCES evidence(id),
+    expired_at TEXT NOT NULL,
+    reason TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ingestion_receipts (

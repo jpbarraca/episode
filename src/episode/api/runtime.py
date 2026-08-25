@@ -111,6 +111,7 @@ class OperationalView:
         connector_statuses: Callable[[], Sequence[Mapping[str, Any]]],
         plugin_statuses: Callable[[], Sequence[Mapping[str, Any]]],
         snapshots_enabled: bool,
+        retention_status: Callable[[], Mapping[str, Any]] | None = None,
     ) -> None:
         self._version = version
         self._engine_status = engine_status
@@ -119,6 +120,7 @@ class OperationalView:
         self._connector_statuses = connector_statuses
         self._plugin_statuses = plugin_statuses
         self._snapshots_enabled = snapshots_enabled
+        self._retention_status = retention_status
 
     def _connectors(self) -> list[dict[str, Any]]:
         return [dict(status) for status in self._connector_statuses()]
@@ -139,6 +141,7 @@ class OperationalView:
         engine = dict(self._engine_status())
         recorder = dict(self._recorder_status())
         snapshots = dict(self._snapshot_status())
+        retention = dict(self._retention_status()) if self._retention_status else {}
         service_states: dict[str, OperationalState] = {
             "engine": "healthy" if engine.get("running") else "unavailable",
             "recorder": "healthy" if recorder.get("running") else "unavailable",
@@ -150,6 +153,8 @@ class OperationalView:
                 else "unavailable"
             ),
         }
+        if retention:
+            service_states["retention"] = str(retention.get("state", "unknown"))
         integrations = self.integrations(detailed=False)
         counts = {
             "total": len(integrations),
@@ -159,6 +164,8 @@ class OperationalView:
         }
         if any(service_states[name] == "unavailable" for name in ("engine", "recorder")):
             state: OperationalState = "unavailable"
+        elif retention and service_states["retention"] == "degraded":
+            state = "degraded"
         elif counts["degraded"] or counts["unavailable"]:
             state = "degraded"
         else:
@@ -175,6 +182,7 @@ class OperationalView:
         engine = dict(self._engine_status())
         recorder = dict(self._recorder_status())
         snapshots = dict(self._snapshot_status())
+        retention = dict(self._retention_status()) if self._retention_status else {}
         status = self.status()
         services = [
             {
@@ -206,6 +214,25 @@ class OperationalView:
                 },
             },
         ]
+        if retention:
+            services.append(
+                {
+                    "id": "retention",
+                    "name": "Visual Evidence retention",
+                    "state": status["services"]["retention"],
+                    "summary": f"{int(retention.get('retention_days', 30))} day retention",
+                    "metrics": {
+                        key: retention.get(key)
+                        for key in (
+                            "retention_days",
+                            "last_cleanup_at",
+                            "expired_count",
+                            "failure_count",
+                            "last_error",
+                        )
+                    },
+                }
+            )
         return {
             "status": status,
             "services": services,

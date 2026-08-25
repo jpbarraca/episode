@@ -156,11 +156,11 @@ cleanup is logged without preventing the remaining resources from closing.
 Asynchronous plugin startup and shutdown are bounded independently, so a hung
 plugin cannot indefinitely block later integrations or application cleanup.
 
-At startup, the Episode engine evaluates persisted active Episodes against
-their stored minimum deadline. An expired Episode is closed deterministically.
-The current beta does not yet reconstruct recording targets or resume capture
-for an Episode whose deadline is still in the future; restart continuity is an
-explicit operational-hardening task.
+At startup, the Episode engine closes persisted active Episodes whose minimum
+deadline has passed. After plugins restore media registrations, the recording
+engine reconstructs targets for Episodes whose deadline remains in the future
+and resumes capture with new recording sessions rather than pretending file
+continuity.
 
 
 ## Persistence model
@@ -209,6 +209,9 @@ The additive tables include:
 - `events`: canonical observations with a stable deduplication key.
 - `evidence`: incident material with artifact and integrity references.
 - `episodes`: lifecycle and summary index.
+- `system_settings`: UI-managed installation policy such as visual retention.
+- `evidence_expirations`: intentional Evidence tombstones after retained bytes
+  are removed.
 
 During the pre-release lifecycle, Episode supports only the current database
 schema. Schema migration guarantees begin when the stable storage contract is
@@ -258,12 +261,19 @@ receipts, manifests, journals, or Episode bundle contents.
 Recordings remain active for the Episode lifecycle and are stored as sequential,
 immutable segments. A shared `recording_session_id` and ordered `segment_index`
 identify chunks from one continuous recording action without relying on filename
-interpretation. Episode asks FFmpeg to close the active segment during orderly
-shutdown and publishes it only after validation. Container grace limits,
-multiple concurrent streams, a native-process stall, or abrupt host failure can
-still leave the current segment as an unpublished `.part` file. Segments
-finalized before the interruption remain durable Episode Evidence. Startup does
-not yet validate, quarantine, or resume these partial files.
+interpretation. On shutdown Episode signals all active FFmpeg processes before
+awaiting them, so concurrent cameras share one bounded grace period. Startup
+validates leftover `.mp4.part` files: playable segments are finalized as
+recording Evidence, invalid segments are preserved as explicit incomplete
+Evidence, and every outcome is journaled.
+
+One global visual Evidence retention period defaults to 30 days and is managed
+from the System UI. Startup and hourly cleanup remove expired video, snapshots,
+embedded pictures, thumbnails, timelapses, and other Episode-managed visual
+copies. The canonical Evidence row and portable manifest retain an explicit
+expiration tombstone without a recoverable file path. Files currently being
+written are deferred until a later cleanup, and failures degrade System status
+for operator action.
 
 Evidence correlation uses the source observation timestamp and Area. Delayed
 uploads can therefore join an already-closed Episode when they were captured

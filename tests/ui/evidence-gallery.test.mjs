@@ -41,6 +41,14 @@ test("Evidence collections use cached thumbnails while viewers retain originals"
       mime_type: "video/mp4",
       metadata: {},
     },
+    {
+      id: "expired-snapshot",
+      device_id: "camera",
+      evidence_type: "snapshot",
+      mime_type: "image/jpeg",
+      availability: "expired",
+      metadata: {},
+    },
   ]);
 
   assert.match(html, /evidence\/snapshot-1\/thumbnail/);
@@ -48,4 +56,6 @@ test("Evidence collections use cached thumbnails while viewers retain originals"
   assert.match(html, /this\.src='\/api\/v1\/evidence\/snapshot-1\/file'/);
   assert.match(html, /this\.hidden=true/);
   assert.doesNotMatch(html, /<video/);
+  assert.doesNotMatch(html, /evidence\/expired-snapshot\/thumbnail/);
+  assert.match(html, /Visual Evidence expired under the retention policy/);
 });

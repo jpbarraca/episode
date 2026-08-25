@@ -107,11 +107,11 @@ notes, and run
 `docker compose --env-file .env pull` followed by
 `docker compose --env-file .env up -d`.
 
-Before stopping or replacing the container, allow active Episodes to finish
-when practical. The current beta preserves every recording segment that has
-already been finalized, but an interruption during capture can leave the
-current segment as an unpublished `.part` file. Automatic repair or resumption
-of that in-progress segment is not implemented yet.
+During shutdown Episode signals all active FFmpeg processes together and gives
+them a bounded grace period to finalize their current segments. On startup it
+validates leftover `.mp4.part` files: playable media becomes recording Evidence,
+invalid media is preserved as explicit incomplete Evidence, and capture resumes
+with a new session when a persisted Episode is still active.
 
 ### Area recording
 
@@ -196,11 +196,17 @@ event payloads, snapshots, recordings, an atomic `manifest.json`, and an
 append-only `journal.ndjson`. The folder remains understandable if the SQLite
 index is unavailable. Keep this directory backed up or synchronized separately.
 
-Completed Evidence is immutable and indexed by checksum. A `.part` recording
-is working state rather than Evidence: it is not included in the Episode
-manifest or UI until FFmpeg closes and Episode validates it. After an
-interrupted capture, retain such files for diagnosis; do not assume they are
-playable or delete them before reviewing the logs.
+Completed Evidence is immutable and indexed by checksum. A `.part` recording is
+working state until FFmpeg closes it. Interrupted working files are reconciled
+on startup and remain visible as completed or incomplete Evidence rather than
+being silently abandoned.
+
+Episode defaults to retaining managed visual Evidence for 30 days. Configure
+the global period under **System → Storage and retention**. Cleanup runs at
+startup and hourly, removes original and derived visual files together, and
+leaves an explicit expiration tombstone in the Episode. Requirements vary by
+jurisdiction; exported files and external backups require their own lifecycle
+policy.
 
 Local `episode.json`, `.env`, and runtime data—including the SQLite-managed
 inventory—are ignored by Git and must never be committed.
@@ -216,7 +222,7 @@ inventory—are ignored by Git and must never be committed.
 
 ## Project status
 
-Episode `0.1.0-beta.2` is a working ONVIF-first public beta for technical
+Episode `0.1.0-beta.3` is a working ONVIF-first public beta for technical
 self-hosters using IP cameras and Docker. Hikvision integrations provide
 optional enrichment. The current priorities are reliable preservation, correct
 correlation, simple installation, and an uncluttered Episode-first interface.

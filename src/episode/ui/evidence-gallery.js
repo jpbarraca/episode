@@ -35,15 +35,20 @@ function renderEvidenceThumbnail(evidence, isImage) {
       onerror="this.onerror=null;${fallback}">`;
 }
 
+function renderExpiredEvidence(evidence) {
+  return `<div class="evidence-item-file"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
+}
+
 function renderEvidenceItem(evidence, index) {
   const isVideo = evidence.mime_type?.startsWith("video/");
   const isImage = evidence.mime_type?.startsWith("image/");
+  const isExpired = evidence.availability === "expired";
   const duration = evidence.metadata?.duration_seconds;
   const label = evidence.evidence_type;
   return `<article class="evidence-item" tabindex="0" role="button" onclick="showCarousel(null, ${index})" onkeydown="if(event.key==='Enter'||event.key===' ')showCarousel(null, ${index})">
     <div class="evidence-item-preview">
-      ${isVideo || isImage ? renderEvidenceThumbnail(evidence, isImage) : ""}
-      ${!isVideo && !isImage ? `<div class="evidence-item-file"><svg><use href="icons.svg?v=2#file"></use></svg><strong>${escHtml(titleCase(evidence.evidence_type))}</strong><span>${escHtml(evidence.mime_type || "Unknown format")}</span></div>` : ""}
+      ${isExpired ? renderExpiredEvidence(evidence) : isVideo || isImage ? renderEvidenceThumbnail(evidence, isImage) : ""}
+      ${!isExpired && !isVideo && !isImage ? `<div class="evidence-item-file"><svg><use href="icons.svg?v=2#file"></use></svg><strong>${escHtml(titleCase(evidence.evidence_type))}</strong><span>${escHtml(evidence.mime_type || "Unknown format")}</span></div>` : ""}
       <span class="evidence-type-chip">${escHtml(titleCase(evidence.evidence_type))}</span>
     </div>
     <div class="evidence-item-body">
@@ -105,11 +110,12 @@ function renderEvidenceBundle(group, items, deviceNames, areaNames) {
         const index = items.indexOf(evidence);
         const isVideo = evidence.mime_type?.startsWith("video/");
         const isImage = evidence.mime_type?.startsWith("image/");
+        const isExpired = evidence.availability === "expired";
         const deviceName = deviceNames.get(evidence.device_id) || evidence.device_id;
         return `<article class="evidence-archive-item" tabindex="0" role="button" onclick="showCarousel(null, ${index})" onkeydown="if(event.key==='Enter')showCarousel(null, ${index})">
           <div class="evidence-archive-preview">
-            ${isVideo || isImage ? renderEvidenceThumbnail(evidence, isImage) : ""}
-            ${!isVideo && !isImage ? `<div class="evidence-file-preview"><strong>${escHtml(titleCase(evidence.evidence_type))}</strong><span>${escHtml(evidence.mime_type || "Unknown format")}</span></div>` : ""}
+            ${isExpired ? renderExpiredEvidence(evidence) : isVideo || isImage ? renderEvidenceThumbnail(evidence, isImage) : ""}
+            ${!isExpired && !isVideo && !isImage ? `<div class="evidence-file-preview"><strong>${escHtml(titleCase(evidence.evidence_type))}</strong><span>${escHtml(evidence.mime_type || "Unknown format")}</span></div>` : ""}
             <span class="evidence-type-chip">${escHtml(titleCase(evidence.evidence_type))}</span>
           </div>
           <div class="evidence-archive-body">
@@ -186,8 +192,11 @@ function renderCarousel() {
 
   const isVideo = evidence.mime_type?.startsWith("video/");
   const isImage = evidence.mime_type?.startsWith("image/");
+  const isExpired = evidence.availability === "expired";
   let mediaHtml = "";
-  if (isVideo) {
+  if (isExpired) {
+    mediaHtml = `<div class="carousel-file-preview"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
+  } else if (isVideo) {
     mediaHtml = `<video src="${API}/evidence/${evidence.id}/file" controls autoplay></video>`;
   } else if (isImage) {
     mediaHtml = `<div class="carousel-image-frame">
@@ -219,7 +228,7 @@ function renderCarousel() {
       ${evidence.episode_id ? `<a href="#episode/${evidence.episode_id}" onclick="closeCarousel()">Episode</a>` : ""}
     </nav>`;
 
-  if (isImage && evidence.episode_id) {
+  if (!isExpired && isImage && evidence.episode_id) {
     const requestId = ++boundingBoxRequest;
     api("/evidence/" + evidence.id + "/closest-event")
       .then(closest => {

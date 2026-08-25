@@ -64,8 +64,11 @@ def evidence_router(context: ApiContext) -> APIRouter:
         evidence = await repo.get_evidence(evidence_id)
         if not evidence:
             raise HTTPException(404, "Evidence not found")
+        if evidence.availability == "expired":
+            return {"event": None, "bounding_box": None, "target_type": None}
+        no_match = {"event": None, "bounding_box": None, "target_type": None}
         if not evidence.episode_id:
-            raise HTTPException(404, "Evidence not linked to an episode")
+            return no_match
 
         events = await repo.list_events(
             episode_id=evidence.episode_id,
@@ -73,7 +76,7 @@ def evidence_router(context: ApiContext) -> APIRouter:
         )
         events = [event for event in events if event.timestamp <= evidence.timestamp]
         if not events:
-            raise HTTPException(404, "No events found for this evidence")
+            return no_match
 
         closest = min(events, key=lambda event: abs(event.timestamp - evidence.timestamp))
         if (
@@ -81,7 +84,7 @@ def evidence_router(context: ApiContext) -> APIRouter:
             and abs((closest.timestamp - evidence.timestamp).total_seconds())
             > context.snapshot_window
         ):
-            raise HTTPException(404, "Closest event exceeds snapshot window")
+            return no_match
 
         bounding_box, target_type = event_annotations(closest)
         return {
@@ -95,6 +98,8 @@ def evidence_router(context: ApiContext) -> APIRouter:
         evidence = await repo.get_evidence(evidence_id)
         if not evidence:
             raise HTTPException(404, "Evidence not found")
+        if evidence.availability == "expired":
+            raise HTTPException(410, "Evidence expired under the retention policy")
         if not os.path.exists(evidence.file_path):
             raise HTTPException(404, "File not found on disk")
         return FileResponse(evidence.file_path, media_type=evidence.mime_type)
@@ -104,6 +109,8 @@ def evidence_router(context: ApiContext) -> APIRouter:
         evidence = await repo.get_evidence(evidence_id)
         if not evidence:
             raise HTTPException(404, "Evidence not found")
+        if evidence.availability == "expired":
+            raise HTTPException(410, "Evidence expired under the retention policy")
         if not context.thumbnails:
             raise HTTPException(404, "Thumbnail not available")
 

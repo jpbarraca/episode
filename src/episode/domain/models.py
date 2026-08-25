@@ -135,6 +135,9 @@ class Evidence:
     metadata: dict = field(default_factory=dict)
     event_id: str | None = None
     episode_id: str | None = None
+    availability: str = "available"
+    expired_at: datetime | None = None
+    expiration_reason: str | None = None
 
 
 @dataclass

@@ -49,6 +49,7 @@ class EpisodeEngine:
         self._bus.subscribe("receipt.received", self._on_receipt_received)
         self._bus.subscribe("event.received", self._on_event_received)
         self._bus.subscribe("evidence.received", self._on_evidence_received)
+        await self._close_timed_out_episodes()
         self._timeout_task = asyncio.create_task(
             self._timeout_loop(),
             name="episode-timeout-loop",
@@ -392,20 +393,23 @@ class EpisodeEngine:
                 )
             )
 
+    async def _close_timed_out_episodes(self) -> None:
+        async with self._lifecycle_lock:
+            closed = await self._repo.close_timed_out_episodes(self._timeout)
+        for episode in closed:
+            logger.info("Episode %s closed (activity policy satisfied)", episode.id)
+            await self._bus.publish(
+                Message(
+                    type="episode.updated",
+                    data={"episode_id": episode.id, "state": EpisodeState.CLOSED.value},
+                )
+            )
+
     async def _timeout_loop(self):
         while self._running:
             await asyncio.sleep(1)
             try:
-                async with self._lifecycle_lock:
-                    closed = await self._repo.close_timed_out_episodes(self._timeout)
-                for ep in closed:
-                    logger.info("Episode %s closed (activity policy satisfied)", ep.id)
-                    await self._bus.publish(
-                        Message(
-                            type="episode.updated",
-                            data={"episode_id": ep.id, "state": EpisodeState.CLOSED.value},
-                        )
-                    )
+                await self._close_timed_out_episodes()
             except Exception:
                 logger.exception("Error in timeout loop")
 

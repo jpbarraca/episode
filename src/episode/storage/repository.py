@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 
+_EVIDENCE_SELECT = """
+SELECT e.*,
+       x.expired_at AS retention_expired_at,
+       x.reason AS retention_expiration_reason
+FROM evidence e
+LEFT JOIN evidence_expirations x ON x.evidence_id = e.id
+"""
+
 
 def _utc_iso(dt: datetime | None) -> str | None:
     if dt is None:
@@ -108,6 +116,23 @@ class Repository:
             self._provenance = None
             self._inventory = None
             self._events = None
+
+    async def get_system_setting(self, key: str) -> str | None:
+        rows = await self._conn.execute_fetchall(
+            "SELECT value FROM system_settings WHERE key = ?",
+            (key,),
+        )
+        return str(rows[0]["value"]) if rows else None
+
+    async def set_system_setting(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            """INSERT INTO system_settings (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE
+               SET value = excluded.value, updated_at = excluded.updated_at""",
+            (key, value, _utc_iso(datetime.now(tz=timezone.utc))),
+        )
+        await self._conn.commit()
 
     # --- Provenance ---
 
@@ -369,6 +394,82 @@ class Repository:
     async def update_event_episode(self, event_id: str, episode_id: str) -> None:
         await self._event_store().update_episode(event_id, episode_id)
 
+    async def visual_artifacts_for_event(self, event_id: str) -> list[RawArtifact]:
+        rows = await self._conn.execute_fetchall(
+            """SELECT DISTINCT a.*
+               FROM raw_artifacts a
+               WHERE a.id IN (
+                   SELECT artifact_id FROM ingestion_receipts
+                   WHERE event_id = ? AND artifact_id IS NOT NULL
+               )""",
+            (event_id,),
+        )
+        return [self._provenance._row_to_artifact(row) for row in rows]
+
+    async def mark_event_visual_expired(
+        self,
+        event: Event,
+        *,
+        expired_at: datetime,
+        artifact_ids: list[str],
+    ) -> None:
+        expired_value = _utc_iso(expired_at)
+        metadata = dict(event.metadata)
+        metadata.pop("embedded_picture", None)
+        metadata.pop("picture_sha256", None)
+        metadata["visual_evidence"] = {
+            "availability": "expired",
+            "expired_at": expired_value,
+            "expiration_reason": "retention_policy",
+        }
+        await self._conn.execute(
+            "UPDATE events SET raw_payload_path = NULL, metadata = ? WHERE id = ?",
+            (json.dumps(metadata), event.id),
+        )
+        for artifact_id in artifact_ids:
+            references = await self._conn.execute_fetchall(
+                """SELECT 1 FROM evidence e
+                   LEFT JOIN evidence_expirations x ON x.evidence_id = e.id
+                   WHERE e.artifact_id = ? AND x.evidence_id IS NULL
+                   UNION ALL
+                   SELECT 1 FROM ingestion_receipts r
+                   JOIN events linked ON linked.id = r.event_id
+                   WHERE r.artifact_id = ? AND linked.id != ?
+                     AND linked.raw_payload_path IS NOT NULL
+                   LIMIT 1""",
+                (artifact_id, artifact_id, event.id),
+            )
+            if not references:
+                await self._conn.execute(
+                    """UPDATE raw_artifacts
+                       SET file_path = ?, original_filename = NULL, byte_size = 0,
+                           metadata = ?
+                       WHERE id = ?""",
+                    (
+                        f"expired:{artifact_id}",
+                        json.dumps(
+                            {
+                                "availability": "expired",
+                                "expired_at": expired_value,
+                                "expiration_reason": "retention_policy",
+                            }
+                        ),
+                        artifact_id,
+                    ),
+                )
+        await self._conn.commit()
+        if event.episode_id:
+            await self.append_episode_journal(
+                event.episode_id,
+                "event.visual_evidence_expired",
+                {
+                    "event_id": event.id,
+                    "captured_at": event.timestamp.isoformat(),
+                    "reason": "retention_policy",
+                },
+            )
+            await self.refresh_episode_manifest(event.episode_id)
+
     def _event_store(self) -> EventStore:
         if self._events is None:
             raise RuntimeError("Repository is not initialized")
@@ -418,7 +519,8 @@ class Repository:
 
     async def get_evidence(self, evidence_id: str) -> Evidence | None:
         row = await self._conn.execute_fetchall(
-            "SELECT * FROM evidence WHERE id = ?", (evidence_id,)
+            f"{_EVIDENCE_SELECT} WHERE e.id = ?",
+            (evidence_id,),
         )
         if not row:
             return None
@@ -439,25 +541,25 @@ class Repository:
         clauses = []
         params = []
         if episode_id:
-            clauses.append("episode_id = ?")
+            clauses.append("e.episode_id = ?")
             params.append(episode_id)
         if event_id:
-            clauses.append("event_id = ?")
+            clauses.append("e.event_id = ?")
             params.append(event_id)
         if device_id:
-            clauses.append("device_id = ?")
+            clauses.append("e.device_id = ?")
             params.append(device_id)
         if area_id:
-            clauses.append("area_id = ?")
+            clauses.append("e.area_id = ?")
             params.append(area_id)
         if evidence_type:
-            clauses.append("evidence_type = ?")
+            clauses.append("e.evidence_type = ?")
             params.append(evidence_type)
         if has_episode is not None:
-            clauses.append("episode_id IS NOT NULL" if has_episode else "episode_id IS NULL")
+            clauses.append("e.episode_id IS NOT NULL" if has_episode else "e.episode_id IS NULL")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         rows = await self._conn.execute_fetchall(
-            f"SELECT * FROM evidence{where} ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
+            f"{_EVIDENCE_SELECT}{where} ORDER BY e.timestamp DESC, e.id DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
         )
         return [self._row_to_evidence(r) for r in rows]
@@ -471,28 +573,34 @@ class Repository:
                 FROM evidence e
                 INNER JOIN (
                   SELECT episode_id, MIN(timestamp) AS min_ts
-                  FROM evidence
-                  WHERE episode_id IN ({placeholders}) AND mime_type LIKE 'image/%'
-                  GROUP BY episode_id
+                  FROM evidence candidate
+                  LEFT JOIN evidence_expirations x ON x.evidence_id = candidate.id
+                  WHERE candidate.episode_id IN ({placeholders})
+                    AND candidate.mime_type LIKE 'image/%'
+                    AND x.evidence_id IS NULL
+                  GROUP BY candidate.episode_id
                 ) first_image
                   ON e.episode_id = first_image.episode_id
                  AND e.timestamp = first_image.min_ts
-                WHERE e.mime_type LIKE 'image/%'""",
+                LEFT JOIN evidence_expirations expired ON expired.evidence_id = e.id
+                WHERE e.mime_type LIKE 'image/%' AND expired.evidence_id IS NULL""",
             episode_ids,
         )
         return {row["episode_id"]: row["evidence_id"] for row in rows}
 
     async def find_orphan_evidence(self, older_than: timedelta | None = None) -> list[Evidence]:
         rows = await self._conn.execute_fetchall(
-            "SELECT * FROM evidence WHERE event_id IS NULL ORDER BY timestamp ASC"
+            f"{_EVIDENCE_SELECT} "
+            "WHERE e.event_id IS NULL AND x.evidence_id IS NULL "
+            "ORDER BY e.timestamp ASC"
         )
         return [self._row_to_evidence(r) for r in rows]
 
     async def find_orphan_evidence_by_device(self, device_id: str) -> list[Evidence]:
         rows = await self._conn.execute_fetchall(
-            """SELECT * FROM evidence
-               WHERE device_id = ? AND event_id IS NULL AND episode_id IS NULL
-               ORDER BY timestamp ASC""",
+            f"{_EVIDENCE_SELECT} "
+            "WHERE e.device_id = ? AND e.event_id IS NULL AND e.episode_id IS NULL "
+            "AND x.evidence_id IS NULL ORDER BY e.timestamp ASC",
             (device_id,),
         )
         return [self._row_to_evidence(r) for r in rows]
@@ -510,6 +618,93 @@ class Repository:
             (event_id, evidence_id),
         )
         await self._conn.commit()
+
+    async def list_visual_evidence_before(self, cutoff: datetime) -> list[Evidence]:
+        rows = await self._conn.execute_fetchall(
+            f"{_EVIDENCE_SELECT} "
+            "WHERE x.evidence_id IS NULL AND e.timestamp < ? "
+            "AND (e.mime_type LIKE 'image/%' OR e.mime_type LIKE 'video/%' "
+            "OR e.evidence_type = 'incomplete_recording') "
+            "ORDER BY e.timestamp ASC",
+            (_utc_iso(cutoff),),
+        )
+        return [self._row_to_evidence(row) for row in rows]
+
+    async def visual_artifacts_for_evidence(self, evidence_id: str) -> list[RawArtifact]:
+        rows = await self._conn.execute_fetchall(
+            """SELECT DISTINCT a.*
+               FROM raw_artifacts a
+               WHERE a.id = (SELECT artifact_id FROM evidence WHERE id = ?)
+                  OR a.id IN (
+                      SELECT artifact_id FROM ingestion_receipts
+                      WHERE evidence_id = ? AND artifact_id IS NOT NULL
+                  )""",
+            (evidence_id, evidence_id),
+        )
+        return [self._provenance._row_to_artifact(row) for row in rows]
+
+    async def mark_evidence_expired(
+        self,
+        evidence: Evidence,
+        *,
+        expired_at: datetime,
+        artifact_ids: list[str],
+    ) -> None:
+        expired_value = _utc_iso(expired_at)
+        await self._conn.execute(
+            """INSERT OR IGNORE INTO evidence_expirations
+               (evidence_id, expired_at, reason) VALUES (?, ?, ?)""",
+            (evidence.id, expired_value, "retention_policy"),
+        )
+        await self._conn.execute(
+            """UPDATE evidence
+               SET file_path = '', original_filename = NULL, artifact_id = NULL,
+                   byte_size = NULL, sha256 = NULL, metadata = '{}'
+               WHERE id = ?""",
+            (evidence.id,),
+        )
+        for artifact_id in artifact_ids:
+            references = await self._conn.execute_fetchall(
+                """SELECT 1
+                   FROM evidence e
+                   LEFT JOIN evidence_expirations x ON x.evidence_id = e.id
+                   WHERE e.artifact_id = ? AND e.id != ? AND x.evidence_id IS NULL
+                   LIMIT 1""",
+                (artifact_id, evidence.id),
+            )
+            if not references:
+                await self._conn.execute(
+                    """UPDATE raw_artifacts
+                       SET file_path = ?, original_filename = NULL, byte_size = 0,
+                           metadata = ?
+                       WHERE id = ?""",
+                    (
+                        f"expired:{artifact_id}",
+                        json.dumps(
+                            {
+                                "availability": "expired",
+                                "expired_at": expired_value,
+                                "expiration_reason": "retention_policy",
+                            }
+                        ),
+                        artifact_id,
+                    ),
+                )
+        await self._conn.commit()
+
+        if evidence.episode_id:
+            await self.append_episode_journal(
+                evidence.episode_id,
+                "evidence.expired",
+                {
+                    "evidence_id": evidence.id,
+                    "evidence_type": evidence.evidence_type,
+                    "captured_at": evidence.timestamp.isoformat(),
+                    "sha256": evidence.sha256,
+                    "reason": "retention_policy",
+                },
+            )
+            await self.refresh_episode_manifest(evidence.episode_id)
 
     # --- Episodes ---
 
@@ -899,6 +1094,20 @@ class Repository:
             await self.refresh_episode_manifest(episode.id)
         return closed
 
+    async def append_episode_journal(
+        self,
+        episode_id: str,
+        entry_type: str,
+        data: dict | None = None,
+    ) -> None:
+        await asyncio.to_thread(
+            append_journal,
+            self._data_dir,
+            episode_id,
+            entry_type,
+            data,
+        )
+
     # --- Portable Episode bundles ---
 
     async def rebuild_episode_manifests(self) -> None:
@@ -911,6 +1120,12 @@ class Repository:
 
     @staticmethod
     def _row_to_evidence(row: aiosqlite.Row) -> Evidence:
+        expired_at = row["retention_expired_at"] if "retention_expired_at" in row.keys() else None
+        expiration_reason = (
+            row["retention_expiration_reason"]
+            if "retention_expiration_reason" in row.keys()
+            else None
+        )
         return Evidence(
             id=row["id"],
             device_id=row["device_id"],
@@ -926,6 +1141,9 @@ class Repository:
             metadata=json.loads(row["metadata"]),
             event_id=row["event_id"],
             episode_id=row["episode_id"],
+            availability="expired" if expired_at else "available",
+            expired_at=datetime.fromisoformat(expired_at) if expired_at else None,
+            expiration_reason=expiration_reason,
         )
 
     @staticmethod

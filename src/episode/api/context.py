@@ -11,6 +11,7 @@ from episode.api.thumbnails import ThumbnailCache
 from episode.inventory import DeviceValidationService, InventoryService
 from episode.media.previews import CurrentViewService
 from episode.media.timelapse import TimelapseService
+from episode.retention import RetentionService
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class ApiContext:
     validator: DeviceValidationService | None = None
     current_views: CurrentViewService | None = None
     thumbnails: ThumbnailCache | None = None
+    retention: RetentionService | None = None
 
     def __post_init__(self) -> None:
         if self.timelapses is None:
