@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from episode.domain.models import Area, Device, EventState
 from episode.engine.bus import EventBus, Message
 from episode.engine.engine import EpisodeEngine
 from episode.media import CameraMedia, MediaRegistry
-from episode.plugins.onvif.client import SOAP, TDS, ONVIFClient, ONVIFError
+from episode.plugins.onvif.client import SOAP, TDS, WSA, ONVIFClient, ONVIFError
 from episode.plugins.onvif.events import ONVIFStateTracker, parse_notifications
 from episode.storage.repository import Repository
 
@@ -219,6 +220,42 @@ async def test_snapshot_action_preserves_downloaded_bytes_as_episode_evidence():
     await snapshot_engine.stop()
     await episode_engine.stop()
     await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_envelope_contains_ws_addressing_headers():
+    client = ONVIFClient("192.0.2.1", "user", "pass")
+    action = "http://www.onvif.org/ver10/events/wsdl/PullMessages"
+    destination = "http://192.0.2.1/onvif/events"
+    try:
+        first = ET.fromstring(
+            client._envelope(
+                ET.Element("{urn:test}Read"),
+                authenticated=False,
+                soap_action=action,
+                destination=destination,
+            )
+        )
+        second = ET.fromstring(
+            client._envelope(
+                ET.Element("{urn:test}Read"),
+                authenticated=False,
+                soap_action=action,
+                destination=destination,
+            )
+        )
+
+        assert first.findtext(f"./{{{SOAP}}}Header/{{{WSA}}}To") == destination
+        assert first.findtext(f"./{{{SOAP}}}Header/{{{WSA}}}Action") == action
+        first_message_id = first.findtext(f"./{{{SOAP}}}Header/{{{WSA}}}MessageID")
+        second_message_id = second.findtext(f"./{{{SOAP}}}Header/{{{WSA}}}MessageID")
+        assert first_message_id and first_message_id.startswith("urn:uuid:")
+        assert second_message_id and second_message_id.startswith("urn:uuid:")
+        uuid.UUID(first_message_id.removeprefix("urn:uuid:"))
+        uuid.UUID(second_message_id.removeprefix("urn:uuid:"))
+        assert first_message_id != second_message_id
+    finally:
+        await client.close()
 
 
 def test_onvif_level_notifications_only_emit_real_transitions():

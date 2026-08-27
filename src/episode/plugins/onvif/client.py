@@ -4,6 +4,7 @@ import base64
 import hashlib
 import logging
 import os
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -64,6 +65,11 @@ def _local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+def _wsa(name: str) -> ET.Element:
+    """Create a WS-Addressing element."""
+    return ET.Element(f"{{{WSA}}}{name}")
+
+
 class ONVIFClient:
     """Minimal ONVIF SOAP client supporting Digest and WS-UsernameToken."""
 
@@ -108,9 +114,30 @@ class ONVIFClient:
             (parsed.scheme, f"{configured.hostname}{port}", parsed.path, parsed.query, "")
         )
 
-    def _envelope(self, operation: ET.Element, *, authenticated: bool) -> bytes:
+    def _envelope(
+        self,
+        operation: ET.Element,
+        *,
+        authenticated: bool,
+        soap_action: str | None = None,
+        destination: str | None = None,
+        message_id: str | None = None,
+    ) -> bytes:
         root = ET.Element(f"{{{SOAP}}}Envelope")
         header = ET.SubElement(root, f"{{{SOAP}}}Header")
+        if destination:
+            to = _wsa("To")
+            to.text = destination
+            header.append(to)
+        if soap_action:
+            action = _wsa("Action")
+            action.text = soap_action
+            header.append(action)
+        if message_id is None:
+            message_id = f"urn:uuid:{uuid.uuid4()}"
+        msg_id = _wsa("MessageID")
+        msg_id.text = message_id
+        header.append(msg_id)
         if authenticated and self.auth_mode != "digest":
             nonce = os.urandom(16)
             now = datetime.now(timezone.utc) + self._clock_offset
@@ -164,7 +191,12 @@ class ONVIFClient:
     ) -> tuple[ET.Element, bytes]:
         response = await self._client.post(
             url,
-            content=self._envelope(operation, authenticated=authenticated),
+            content=self._envelope(
+                operation,
+                authenticated=authenticated,
+                soap_action=action,
+                destination=url,
+            ),
             headers={"Content-Type": f'application/soap+xml; charset=utf-8; action="{action}"'},
         )
         response.raise_for_status()
