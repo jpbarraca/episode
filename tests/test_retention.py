@@ -10,7 +10,7 @@ from episode.api.routes import create_api
 from episode.api.thumbnails import ThumbnailCache
 from episode.config import EpisodeConfig
 from episode.domain.models import Area, Device, Episode, EpisodeState, Event, Evidence
-from episode.retention import RetentionService
+from episode.retention import RETENTION_POLICY_SETTING, RetentionService
 from episode.storage.repository import Repository
 
 
@@ -59,6 +59,8 @@ async def test_retention_expires_visual_evidence_and_derivatives_but_not_active_
             evidence_type="snapshot",
             file_path=str(old_path),
             mime_type="image/jpeg",
+            original_filename="camera-original.jpg",
+            metadata={"origin": "camera", "detection": "human"},
             episode_id=episode.id,
         )
     )
@@ -101,6 +103,7 @@ async def test_retention_expires_visual_evidence_and_derivatives_but_not_active_
         thumbnails,
         active_paths=lambda: active_paths,
     )
+    original_artifact = await repository.get_raw_artifact(old.artifact_id)
 
     try:
         assert await retention.run_once(now=now) == 1
@@ -109,6 +112,22 @@ async def test_retention_expires_visual_evidence_and_derivatives_but_not_active_
         assert expired.availability == "expired"
         assert expired.expiration_reason == "retention_policy"
         assert expired.file_path == ""
+        assert expired.original_filename == "camera-original.jpg"
+        assert expired.artifact_id == old.artifact_id
+        assert expired.byte_size == old.byte_size
+        assert expired.sha256 == old.sha256
+        assert expired.metadata == old.metadata
+        artifact = await repository.get_raw_artifact(old.artifact_id)
+        assert artifact.file_path == f"expired:{old.artifact_id}"
+        assert artifact.original_filename == "camera-original.jpg"
+        assert artifact.byte_size == old.byte_size
+        assert artifact.sha256 == old.sha256
+        assert {
+            key: value
+            for key, value in artifact.metadata.items()
+            if key not in {"availability", "expired_at", "expiration_reason"}
+        } == original_artifact.metadata
+        assert artifact.metadata["availability"] == "expired"
         assert not old_path.exists()
         assert not thumbnail_path.exists()
         assert not timelapse.exists()
@@ -127,6 +146,7 @@ async def test_retention_expires_visual_evidence_and_derivatives_but_not_active_
         manifest_evidence = {item["id"]: item for item in manifest["evidence"]}
         assert manifest_evidence[old.id]["availability"] == "expired"
         assert manifest_evidence[old.id]["file"] is None
+        assert manifest_evidence[old.id]["sha256"] == old.sha256
     finally:
         await repository.close()
 
@@ -235,20 +255,67 @@ async def test_retention_settings_api_updates_policy_and_exposes_status(tmp_path
             initial = await client.get("/api/v1/settings/retention")
             updated = await client.put(
                 "/api/v1/settings/retention",
-                json={"retention_days": 15},
+                json={"enabled": True, "retention_days": 15},
+            )
+            disabled = await client.put(
+                "/api/v1/settings/retention",
+                json={"enabled": False, "retention_days": 15},
             )
             invalid = await client.put(
                 "/api/v1/settings/retention",
-                json={"retention_days": 0},
+                json={"enabled": True, "retention_days": 0},
             )
 
         assert initial.status_code == 200
         assert initial.json()["retention_days"] == 30
-        assert "requirements vary" in initial.json()["notice"]
+        assert initial.json()["enabled"] is True
+        assert initial.json()["policy_state"] == "unconfirmed"
+        assert initial.json()["confirmed_at"] is None
+        assert "requirements vary" in initial.json()["notice"].lower()
         assert updated.status_code == 200
         assert updated.json()["retention_days"] == 15
-        assert await repository.get_system_setting("visual_evidence_retention_days") == "15"
+        assert updated.json()["policy_state"] == "configured"
+        assert updated.json()["confirmed_at"] is not None
+        assert disabled.status_code == 200
+        assert disabled.json()["enabled"] is False
+        assert disabled.json()["policy_state"] == "disabled"
+        stored = json.loads(await repository.get_system_setting(RETENTION_POLICY_SETTING))
+        assert stored["enabled"] is False
+        assert stored["retention_days"] == 15
         assert invalid.status_code == 422
     finally:
         await retention.stop()
+        await repository.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_retention_does_not_expire_visual_evidence(tmp_path):
+    repository = await _repository_with_inventory(tmp_path)
+    now = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    source = tmp_path / "kept.jpg"
+    source.write_bytes(b"kept visual evidence")
+    evidence = await repository.create_evidence(
+        Evidence(
+            id="kept-snapshot",
+            device_id="camera",
+            area_id="driveway",
+            timestamp=now - timedelta(days=365),
+            evidence_type="snapshot",
+            file_path=str(source),
+            mime_type="image/jpeg",
+        )
+    )
+    retention = RetentionService(
+        repository,
+        str(tmp_path),
+        ThumbnailCache(tmp_path / "cache" / "thumbnails"),
+    )
+
+    try:
+        policy = await retention.set_policy(enabled=False, retention_days=30)
+        assert policy.state == "disabled"
+        assert await retention.run_once(now=now) == 0
+        assert (await repository.get_evidence(evidence.id)).availability == "available"
+        assert source.exists()
+    finally:
         await repository.close()

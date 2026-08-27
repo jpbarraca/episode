@@ -119,11 +119,15 @@ class StorageResponse(ApiModel):
 
 
 class RetentionSettingsUpdate(ApiModel):
+    enabled: bool
     retention_days: int = Field(ge=1, le=3650)
 
 
 class RetentionSettingsResponse(ApiModel):
+    enabled: bool
     retention_days: int
+    policy_state: Literal["unconfirmed", "configured", "disabled"]
+    confirmed_at: datetime | None = None
     notice: str
     state: OperationalState
     last_cleanup_at: datetime | None = None

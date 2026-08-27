@@ -25,9 +25,9 @@ _SENSITIVE_KEY = re.compile(
 )
 
 _RETENTION_NOTICE = (
-    "Episode automatically deletes visual Evidence older than the selected period. "
-    "Retention requirements vary by jurisdiction and use case. You are responsible "
-    "for choosing an appropriate period and managing exported or externally stored copies."
+    "Episode manages recordings, snapshots, embedded images, and visual derivatives under "
+    "this policy. Requirements vary by jurisdiction and use case. Exported or externally "
+    "stored copies are not managed by Episode."
 )
 
 
@@ -116,8 +116,8 @@ def system_router(context: ApiContext) -> APIRouter:
         )
         diagnostics["storage"] = await asyncio.to_thread(_storage_summary, context.data_dir)
         if context.retention:
+            await context.retention.get_policy()
             retention = context.retention.status()
-            retention["retention_days"] = await context.retention.get_retention_days()
             diagnostics["retention"] = retention
         return _sanitize(diagnostics, context.data_dir)
 
@@ -136,8 +136,8 @@ def system_router(context: ApiContext) -> APIRouter:
     async def retention_settings():
         if not context.retention:
             raise HTTPException(503, "Retention service is unavailable")
+        await context.retention.get_policy()
         status = context.retention.status()
-        status["retention_days"] = await context.retention.get_retention_days()
         return {**status, "notice": _RETENTION_NOTICE}
 
     @router.put(
@@ -147,7 +147,10 @@ def system_router(context: ApiContext) -> APIRouter:
     async def update_retention_settings(request: RetentionSettingsUpdate):
         if not context.retention:
             raise HTTPException(503, "Retention service is unavailable")
-        await context.retention.set_retention_days(request.retention_days)
+        await context.retention.set_policy(
+            enabled=request.enabled,
+            retention_days=request.retention_days,
+        )
         status = context.retention.status()
         return {**status, "notice": _RETENTION_NOTICE}
 

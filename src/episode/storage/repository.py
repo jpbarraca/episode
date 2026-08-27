@@ -134,6 +134,29 @@ class Repository:
         )
         await self._conn.commit()
 
+    async def _mark_raw_artifact_expired(self, artifact_id: str, expired_at: str) -> None:
+        rows = await self._conn.execute_fetchall(
+            "SELECT metadata FROM raw_artifacts WHERE id = ?",
+            (artifact_id,),
+        )
+        if not rows:
+            return
+        try:
+            metadata = json.loads(rows[0]["metadata"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        metadata.update(
+            {
+                "availability": "expired",
+                "expired_at": expired_at,
+                "expiration_reason": "retention_policy",
+            }
+        )
+        await self._conn.execute(
+            "UPDATE raw_artifacts SET file_path = ?, metadata = ? WHERE id = ?",
+            (f"expired:{artifact_id}", json.dumps(metadata), artifact_id),
+        )
+
     # --- Provenance ---
 
     async def create_raw_artifact(self, artifact: RawArtifact) -> RawArtifact:
@@ -440,23 +463,7 @@ class Repository:
                 (artifact_id, artifact_id, event.id),
             )
             if not references:
-                await self._conn.execute(
-                    """UPDATE raw_artifacts
-                       SET file_path = ?, original_filename = NULL, byte_size = 0,
-                           metadata = ?
-                       WHERE id = ?""",
-                    (
-                        f"expired:{artifact_id}",
-                        json.dumps(
-                            {
-                                "availability": "expired",
-                                "expired_at": expired_value,
-                                "expiration_reason": "retention_policy",
-                            }
-                        ),
-                        artifact_id,
-                    ),
-                )
+                await self._mark_raw_artifact_expired(artifact_id, expired_value)
         await self._conn.commit()
         if event.episode_id:
             await self.append_episode_journal(
@@ -658,8 +665,7 @@ class Repository:
         )
         await self._conn.execute(
             """UPDATE evidence
-               SET file_path = '', original_filename = NULL, artifact_id = NULL,
-                   byte_size = NULL, sha256 = NULL, metadata = '{}'
+               SET file_path = ''
                WHERE id = ?""",
             (evidence.id,),
         )
@@ -673,23 +679,7 @@ class Repository:
                 (artifact_id, evidence.id),
             )
             if not references:
-                await self._conn.execute(
-                    """UPDATE raw_artifacts
-                       SET file_path = ?, original_filename = NULL, byte_size = 0,
-                           metadata = ?
-                       WHERE id = ?""",
-                    (
-                        f"expired:{artifact_id}",
-                        json.dumps(
-                            {
-                                "availability": "expired",
-                                "expired_at": expired_value,
-                                "expiration_reason": "retention_policy",
-                            }
-                        ),
-                        artifact_id,
-                    ),
-                )
+                await self._mark_raw_artifact_expired(artifact_id, expired_value)
         await self._conn.commit()
 
         if evidence.episode_id:

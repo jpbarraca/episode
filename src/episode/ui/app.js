@@ -1,7 +1,7 @@
 import { $, $$ } from "./dom.js";
 import { closeCarousel } from "./evidence-gallery.js?v=6";
-import { areas, devices, deviceView, systemStatus } from "./inventory-pages.js?v=6";
-import { onboardingNeeded, welcome } from "./onboarding.js?v=5";
+import { areas, devices, deviceView, systemStatus } from "./inventory-pages.js?v=8";
+import { onboardingNeeded, welcome } from "./onboarding.js?v=7";
 import {
   activity,
   closeReviewOverlays,
@@ -12,6 +12,7 @@ import {
   event,
 } from "./review-pages.js?v=13";
 import { startSidebar } from "./sidebar.js?v=3";
+import { startRetentionPolicy } from "./retention-policy.js?v=1";
 import { toggleCollapse } from "./view.js?v=1";
 
 const THEME_STORAGE_KEY = "episode-theme";
@@ -101,7 +102,10 @@ startSidebar();
 
 async function startApplication() {
   try {
-    const needsOnboarding = await onboardingNeeded();
+    const [, needsOnboarding] = await Promise.all([
+      startRetentionPolicy(),
+      onboardingNeeded(),
+    ]);
     const initialView = location.hash.slice(1).split(/[/?]/, 1)[0];
     if (needsOnboarding && (!initialView || initialView === "episodes")) {
       location.hash = "welcome";

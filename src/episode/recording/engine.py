@@ -169,7 +169,7 @@ class RecordingEngine:
         for episode in episodes:
             if not episode.minimum_end_at or episode.minimum_end_at <= now:
                 continue
-            events = await self._repo.list_events(episode_id=episode.id)
+            events = await self._repo.list_events(episode_id=episode.id, limit=10000)
             targets: dict[str, Device] = {}
             for event in events:
                 if event.event_state != EventState.ACTIVE:

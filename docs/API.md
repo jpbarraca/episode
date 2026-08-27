@@ -94,9 +94,13 @@ Evidence resources expose `availability`, `expired_at`, and
 `expiration_reason`. Retention-expired Evidence remains as a tombstone in JSON
 and Episode manifests, while its file and thumbnail endpoints return `410`.
 
-`GET /settings/retention` returns the global visual Evidence period and cleanup
-status. `PUT /settings/retention` accepts `retention_days` from 1 through 3650;
-the default is 30. Updating the value immediately runs one cleanup pass.
+`GET /settings/retention` returns the global visual Evidence policy, confirmation
+state, and cleanup status. A new installation reports an active 30-day policy
+with `policy_state: "unconfirmed"`. `PUT /settings/retention` accepts `enabled`
+and `retention_days` from 1 through 3650; any successful update records explicit
+administrator confirmation. Updating an enabled policy immediately runs one
+cleanup pass. A disabled policy does not delete Evidence and reports
+`policy_state: "disabled"` so clients can keep the condition visible.
 
 Active Episodes expose `/episodes/{episode_id}/current-views` as a small
 operational projection of Devices currently recording that Episode. Snapshot

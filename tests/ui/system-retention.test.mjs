@@ -24,6 +24,7 @@ const componentsUrl = moduleUrl(`
 `);
 const dialogsUrl = moduleUrl(`
   export function confirmDialog(options) { globalThis.systemConfirmation = options; }
+  export function closeDialog() { globalThis.systemDialogCloses += 1; }
   export function notify(message) { globalThis.systemNotification = message; }
 `);
 const domUrl = moduleUrl(`
@@ -42,6 +43,9 @@ const inventoryUrl = moduleUrl(`
   export function openAreaEditor() {}
   export function openDeviceEditor() {}
 `);
+const retentionPolicyUrl = moduleUrl(`
+  export async function refreshRetentionPolicy() { globalThis.policyRefreshes += 1; }
+`);
 const viewUrl = moduleUrl(`
   export function showContent(html) { globalThis.systemHtml = html; }
   export function showError(error) { throw new Error(error); }
@@ -54,6 +58,8 @@ globalThis.FormData = class {
   get(name) { return this.form[name]; }
 };
 globalThis.systemRequests = [];
+globalThis.policyRefreshes = 0;
+globalThis.systemDialogCloses = 0;
 globalThis.systemResponses = {
   "/diagnostics": {
     status: {
@@ -67,7 +73,10 @@ globalThis.systemResponses = {
     storage: { data_bytes: 0, filesystem_free_bytes: 1000 },
   },
   "/settings/retention": {
+    enabled: true,
     retention_days: 30,
+    policy_state: "unconfirmed",
+    confirmed_at: null,
     notice: "Retention requirements vary by jurisdiction and use case.",
   },
 };
@@ -81,6 +90,7 @@ const module = await import(moduleUrl(
     .replace('"./format.js?v=4"', JSON.stringify(formatUrl))
     .replace('"./timeline.js?v=5"', JSON.stringify(timelineUrl))
     .replace('"./inventory.js?v=6"', JSON.stringify(inventoryUrl))
+    .replace('"./retention-policy.js?v=1"', JSON.stringify(retentionPolicyUrl))
     .replace('"./view.js?v=1"', JSON.stringify(viewUrl)),
 ));
 
@@ -92,14 +102,35 @@ test("System exposes one global visual Evidence retention setting", async () => 
   assert.match(globalThis.systemHtml, /requirements vary by jurisdiction/);
   assert.match(globalThis.systemHtml, /class="section system-retention"/);
   assert.match(globalThis.systemHtml, /class="form-grid system-retention-form"/);
+  assert.match(globalThis.systemHtml, /Confirmation required/);
+  assert.match(globalThis.systemHtml, /name="retention_enabled"[^>]+checked/);
 
-  globalThis.window.saveRetention({ retention_days: "15" });
-  assert.match(globalThis.systemConfirmation.message, /permanently delete/);
+  globalThis.window.saveRetention({ retention_days: "15", retention_enabled: "true" });
+  assert.match(globalThis.systemConfirmation.message, /permanently delete.*15 days/);
   await globalThis.systemConfirmation.onConfirm();
 
   assert.deepEqual(globalThis.systemRequests, [{
     path: "/settings/retention",
-    options: { method: "PUT", body: { retention_days: 15 } },
+    options: { method: "PUT", body: { enabled: true, retention_days: 15 } },
   }]);
   assert.equal(globalThis.systemNotification, "Visual Evidence retention updated");
+  assert.equal(globalThis.systemDialogCloses, 1);
+  assert.equal(globalThis.policyRefreshes, 1);
+});
+
+test("System requires explicit confirmation before disabling retention", async () => {
+  globalThis.systemRequests = [];
+  globalThis.systemDialogCloses = 0;
+  globalThis.window.saveRetention({ retention_days: "30", retention_enabled: null });
+
+  assert.match(globalThis.systemConfirmation.title, /Disable automatic deletion/);
+  assert.match(globalThis.systemConfirmation.message, /retained indefinitely/);
+  await globalThis.systemConfirmation.onConfirm();
+
+  assert.deepEqual(globalThis.systemRequests, [{
+    path: "/settings/retention",
+    options: { method: "PUT", body: { enabled: false, retention_days: 30 } },
+  }]);
+  assert.equal(globalThis.systemNotification, "Automatic retention disabled");
+  assert.equal(globalThis.systemDialogCloses, 1);
 });

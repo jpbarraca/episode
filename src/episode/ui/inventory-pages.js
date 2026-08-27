@@ -5,7 +5,7 @@ import {
   pageHeader,
   sectionHeading,
 } from "./components.js?v=4";
-import { confirmDialog, notify } from "./dialogs.js?v=1";
+import { closeDialog, confirmDialog, notify } from "./dialogs.js?v=1";
 import { escHtml } from "./dom.js";
 import { fmtBytes, fmtShort, plural, titleCase } from "./format.js?v=4";
 import { eventTitle } from "./timeline.js?v=5";
@@ -15,6 +15,7 @@ import {
   openAreaEditor,
   openDeviceEditor,
 } from "./inventory.js?v=6";
+import { refreshRetentionPolicy } from "./retention-policy.js?v=1";
 import { showContent, showError, showLoading } from "./view.js?v=1";
 
 let inventoryAreas = [];
@@ -110,17 +111,26 @@ window.deleteDevice = id => {
 };
 
 window.saveRetention = form => {
-  const retentionDays = Number(new FormData(form).get("retention_days"));
+  const data = new FormData(form);
+  const retentionDays = Number(data.get("retention_days"));
+  const enabled = data.get("retention_enabled") === "true";
   confirmDialog({
-    title: "Change visual Evidence retention?",
-    message: "Changing retention may permanently delete older visual Evidence during the next cleanup.",
-    confirmLabel: "Save retention",
+    title: enabled ? "Confirm visual Evidence retention?" : "Disable automatic deletion?",
+    message: enabled
+      ? `OpenEpisode will automatically and permanently delete managed visual Evidence older than ${retentionDays} days.`
+      : "Managed visual Evidence will be retained indefinitely unless manually removed. A persistent warning will remain visible.",
+    confirmLabel: enabled ? "Confirm retention" : "Disable retention",
     onConfirm: async () => {
       await apiRequest("/settings/retention", {
         method: "PUT",
-        body: { retention_days: retentionDays },
+        body: { enabled, retention_days: retentionDays },
       });
-      notify("Visual Evidence retention updated");
+      closeDialog();
+      notify(
+        enabled ? "Visual Evidence retention updated" : "Automatic retention disabled",
+        enabled ? "success" : "warning",
+      );
+      await refreshRetentionPolicy();
       await systemStatus();
     },
   });
@@ -339,13 +349,22 @@ export async function systemStatus() {
         <div><dt>Filesystem available</dt><dd>${fmtBytes(diagnostics.storage.filesystem_free_bytes)}</dd></div>
       </dl>
       <section class="section system-retention">
-        <h3>Storage and retention</h3>
+        <div class="system-retention-heading">
+          <div><h3>Storage and retention</h3><p>One policy covers visual material managed by this OpenEpisode installation.</p></div>
+          <span class="badge badge-${retention.policy_state === "disabled" ? "unavailable" : retention.policy_state === "unconfirmed" ? "unknown" : "healthy"}">${escHtml(titleCase(retention.policy_state))}</span>
+        </div>
         <form class="form-grid system-retention-form" onsubmit="saveRetention(this); return false">
+          <label class="toggle-row field-span">
+            <input name="retention_enabled" type="checkbox" value="true" ${retention.enabled ? "checked" : ""}>
+            <span><strong>Automatically delete managed visual Evidence</strong><small>Disable only if another process governs deletion or your use case requires indefinite retention.</small></span>
+          </label>
           <label class="field">
-            <span>Visual Evidence retention</span>
+            <span>Retention period</span>
             <input name="retention_days" type="number" min="1" max="3650" required value="${retention.retention_days}">
             <small>Days before Episode deletes managed video, snapshots, embedded images, and visual derivatives.</small>
           </label>
+          ${retention.policy_state === "unconfirmed" ? '<div class="field-span notice notice-warning"><strong>Confirmation required</strong><span>The active 30-day default has not yet been reviewed by an administrator.</span></div>' : ""}
+          ${retention.policy_state === "disabled" ? '<div class="field-span notice notice-danger"><strong>Automatic deletion is disabled</strong><span>Managed visual Evidence will remain until manually removed.</span></div>' : ""}
           <div class="field-span configuration-note">${escHtml(retention.notice)}</div>
           <div class="field-span">
             <button type="submit" class="button button-primary">Save retention</button>

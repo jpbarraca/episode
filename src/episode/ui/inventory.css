@@ -142,6 +142,7 @@
 .notice span { color: var(--text-secondary); font-size: 0.82rem; }
 .notice code { background: color-mix(in srgb, var(--background) 55%, transparent); border-radius: var(--radius-sm); padding: 0.4rem 0.55rem; white-space: nowrap; }
 .notice-warning { background: color-mix(in srgb, var(--warning) 10%, var(--surface)); border-color: color-mix(in srgb, var(--warning) 45%, var(--border)); color: var(--warning); }
+.notice-danger { background: color-mix(in srgb, var(--danger) 10%, var(--surface)); border-color: color-mix(in srgb, var(--danger) 50%, var(--border)); color: var(--danger); }
 
 .empty-state {
   align-items: center;
@@ -245,6 +246,8 @@
 .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent); outline: none; }
 
 .system-retention { margin-top: 2rem; }
+.system-retention-heading { align-items: flex-start; display: flex; gap: 1rem; justify-content: space-between; }
+.system-retention-heading p { color: var(--text-muted); font-size: .78rem; margin-top: .25rem; }
 .system-retention-form {
   align-items: flex-start;
   display: flex;

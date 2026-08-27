@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -12,6 +13,35 @@ from episode.engine.bus import EventBus
 from episode.engine.engine import EpisodeEngine
 from episode.recording.engine import RecordingEngine
 from episode.storage.repository import Repository
+
+
+@pytest.mark.asyncio
+async def test_resume_active_episodes_requests_complete_event_history():
+    episode = Episode(
+        id="active-episode",
+        primary_area_id="test-area",
+        state=EpisodeState.ACTIVE,
+        minimum_end_at=datetime.now(tz=timezone.utc) + timedelta(minutes=1),
+    )
+
+    class RepositoryStub:
+        def __init__(self):
+            self.event_limits = []
+
+        async def list_episodes(self, *, state, limit):
+            return [episode] if state == EpisodeState.ACTIVE else []
+
+        async def list_events(self, *, episode_id, limit):
+            assert episode_id == episode.id
+            self.event_limits.append(limit)
+            return []
+
+    repository = RepositoryStub()
+    recorder = RecordingEngine(repository, EventBus(), "/tmp/episode-test")
+
+    await recorder.resume_active_episodes()
+
+    assert repository.event_limits == [10000]
 
 
 @pytest.mark.skipif(

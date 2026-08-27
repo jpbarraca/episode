@@ -267,13 +267,15 @@ validates leftover `.mp4.part` files: playable segments are finalized as
 recording Evidence, invalid segments are preserved as explicit incomplete
 Evidence, and every outcome is journaled.
 
-One global visual Evidence retention period defaults to 30 days and is managed
-from the System UI. Startup and hourly cleanup remove expired video, snapshots,
-embedded pictures, thumbnails, timelapses, and other Episode-managed visual
-copies. The canonical Evidence row and portable manifest retain an explicit
-expiration tombstone without a recoverable file path. Files currently being
-written are deferred until a later cleanup, and failures degrade System status
-for operator action.
+One global visual Evidence retention policy defaults to an active but
+unconfirmed 30-day period and is managed from the System UI. An administrator
+must explicitly confirm the default, select another period, or disable automatic
+deletion. Disabled retention remains persistently visible in the UI. Startup and
+hourly cleanup remove expired video, snapshots, embedded pictures, thumbnails,
+timelapses, and other Episode-managed visual copies. The canonical Evidence row,
+Raw Artifact, and portable manifest retain identity and integrity metadata while
+removing recoverable file paths. Files currently being written are deferred until
+a later cleanup, and failures degrade System status for operator action.
 
 Evidence correlation uses the source observation timestamp and Area. Delayed
 uploads can therefore join an already-closed Episode when they were captured

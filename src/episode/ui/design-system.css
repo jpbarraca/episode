@@ -142,6 +142,31 @@ body { letter-spacing: -.005em; }
 
 main { padding: 2.1rem clamp(1.4rem, 3.1vw, 3.5rem) 4rem; }
 #view-content { max-width: 1560px; }
+.policy-banner {
+  align-items: center;
+  border: 1px solid;
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+  max-width: 1560px;
+  padding: .8rem .9rem;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+.policy-banner > div { display: flex; flex-direction: column; gap: .18rem; }
+.policy-banner strong { font-size: .8rem; }
+.policy-banner span { color: var(--text-secondary); font-size: .74rem; line-height: 1.4; }
+.policy-banner-warning {
+  background: color-mix(in srgb, var(--warning) 9%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border));
+}
+.policy-banner-danger {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
 .page-header {
   align-items: flex-end;
   border-bottom: 1px solid var(--border-subtle);
@@ -350,6 +375,8 @@ th, td { border-bottom-color: var(--border-subtle); padding: .72rem .8rem; }
 }
 
 @media (max-width: 600px) {
+  .policy-banner { align-items: stretch; flex-direction: column; }
+  .policy-banner .button { text-align: center; }
   .page-header { align-items: flex-start; }
   .page-actions { width: 100%; }
   .page-actions .button { flex: 1; text-align: center; }

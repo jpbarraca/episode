@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,8 +16,21 @@ from episode.storage.repository import Repository
 
 logger = logging.getLogger(__name__)
 
-RETENTION_DAYS_SETTING = "visual_evidence_retention_days"
+RETENTION_POLICY_SETTING = "visual_evidence_retention_policy"
 DEFAULT_RETENTION_DAYS = 30
+
+
+@dataclass(frozen=True)
+class RetentionPolicy:
+    enabled: bool = True
+    retention_days: int = DEFAULT_RETENTION_DAYS
+    confirmed_at: datetime | None = None
+
+    @property
+    def state(self) -> str:
+        if not self.enabled:
+            return "disabled"
+        return "configured" if self.confirmed_at else "unconfirmed"
 
 
 class RetentionService:
@@ -42,7 +57,7 @@ class RetentionService:
         self._last_error: str | None = None
         self._expired_count = 0
         self._failure_count = 0
-        self._retention_days = DEFAULT_RETENTION_DAYS
+        self._policy = RetentionPolicy()
 
     async def start(self) -> None:
         if self._running:
@@ -58,31 +73,70 @@ class RetentionService:
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
 
-    async def get_retention_days(self) -> int:
-        value = await self._repository.get_system_setting(RETENTION_DAYS_SETTING)
+    async def get_policy(self) -> RetentionPolicy:
+        value = await self._repository.get_system_setting(RETENTION_POLICY_SETTING)
         if value is None:
-            self._retention_days = DEFAULT_RETENTION_DAYS
-            return self._retention_days
+            self._policy = RetentionPolicy()
+            return self._policy
         try:
-            days = int(value)
-        except ValueError:
-            logger.error("Invalid stored visual Evidence retention period %r", value)
-            days = DEFAULT_RETENTION_DAYS
-        self._retention_days = days if days > 0 else DEFAULT_RETENTION_DAYS
-        return self._retention_days
+            stored = json.loads(value)
+            enabled = stored["enabled"]
+            days = stored["retention_days"]
+            confirmed_value = stored["confirmed_at"]
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean")
+            if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 3650:
+                raise ValueError("retention_days must be between 1 and 3650")
+            confirmed_at = (
+                datetime.fromisoformat(confirmed_value) if confirmed_value is not None else None
+            )
+            if confirmed_at and confirmed_at.tzinfo is None:
+                confirmed_at = confirmed_at.replace(tzinfo=timezone.utc)
+            self._policy = RetentionPolicy(
+                enabled=enabled,
+                retention_days=days,
+                confirmed_at=confirmed_at,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            logger.error("Invalid stored visual Evidence retention policy; using default")
+            self._policy = RetentionPolicy()
+        return self._policy
 
-    async def set_retention_days(self, days: int) -> None:
+    async def get_retention_days(self) -> int:
+        return (await self.get_policy()).retention_days
+
+    async def set_policy(self, *, enabled: bool, retention_days: int) -> RetentionPolicy:
+        days = retention_days
         if days < 1 or days > 3650:
             raise ValueError("Retention period must be between 1 and 3650 days")
-        await self._repository.set_system_setting(RETENTION_DAYS_SETTING, str(days))
-        self._retention_days = days
-        await self.run_once()
+        policy = RetentionPolicy(
+            enabled=enabled,
+            retention_days=days,
+            confirmed_at=datetime.now(tz=timezone.utc),
+        )
+        await self._repository.set_system_setting(
+            RETENTION_POLICY_SETTING,
+            json.dumps(
+                {
+                    "enabled": policy.enabled,
+                    "retention_days": policy.retention_days,
+                    "confirmed_at": policy.confirmed_at.isoformat(),
+                },
+                separators=(",", ":"),
+            ),
+        )
+        self._policy = policy
+        if enabled:
+            await self.run_once()
+        return policy
 
     async def run_once(self, *, now: datetime | None = None) -> int:
         async with self._cleanup_lock:
             observed_at = now or datetime.now(tz=timezone.utc)
-            days = await self.get_retention_days()
-            cutoff = observed_at - timedelta(days=days)
+            policy = await self.get_policy()
+            if not policy.enabled:
+                return 0
+            cutoff = observed_at - timedelta(days=policy.retention_days)
             expired = 0
             errors: list[str] = []
 
@@ -210,7 +264,12 @@ class RetentionService:
             else "healthy"
             if self._running
             else "unavailable",
-            "retention_days": self._retention_days,
+            "enabled": self._policy.enabled,
+            "retention_days": self._policy.retention_days,
+            "policy_state": self._policy.state,
+            "confirmed_at": (
+                self._policy.confirmed_at.isoformat() if self._policy.confirmed_at else None
+            ),
             "last_cleanup_at": self._last_cleanup_at.isoformat() if self._last_cleanup_at else None,
             "expired_count": self._expired_count,
             "failure_count": self._failure_count,

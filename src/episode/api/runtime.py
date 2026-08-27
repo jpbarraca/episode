@@ -215,16 +215,25 @@ class OperationalView:
             },
         ]
         if retention:
+            retention_enabled = bool(retention.get("enabled", True))
+            retention_days = int(retention.get("retention_days", 30))
             services.append(
                 {
                     "id": "retention",
                     "name": "Visual Evidence retention",
                     "state": status["services"]["retention"],
-                    "summary": f"{int(retention.get('retention_days', 30))} day retention",
+                    "summary": (
+                        f"{retention_days} day retention"
+                        if retention_enabled
+                        else "Automatic deletion disabled"
+                    ),
                     "metrics": {
                         key: retention.get(key)
                         for key in (
+                            "enabled",
                             "retention_days",
+                            "policy_state",
+                            "confirmed_at",
                             "last_cleanup_at",
                             "expired_count",
                             "failure_count",

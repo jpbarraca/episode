@@ -201,12 +201,14 @@ working state until FFmpeg closes it. Interrupted working files are reconciled
 on startup and remain visible as completed or incomplete Evidence rather than
 being silently abandoned.
 
-Episode defaults to retaining managed visual Evidence for 30 days. Configure
-the global period under **System → Storage and retention**. Cleanup runs at
-startup and hourly, removes original and derived visual files together, and
-leaves an explicit expiration tombstone in the Episode. Requirements vary by
-jurisdiction; exported files and external backups require their own lifecycle
-policy.
+Episode automatically deletes managed visual Evidence after 30 days by default.
+First-run setup requires an administrator to confirm that policy or explicitly
+choose another period under **System → Storage and retention**. Disabling
+automatic deletion requires confirmation and leaves a persistent warning in the
+UI. Cleanup runs at startup and hourly, removes original and derived visual files
+together, and leaves an integrity-bearing expiration tombstone in the Episode.
+Requirements vary by jurisdiction; exported files and external backups require
+their own lifecycle policy.
 
 Local `episode.json`, `.env`, and runtime data—including the SQLite-managed
 inventory—are ignored by Git and must never be committed.
