@@ -166,6 +166,22 @@ class RetentionService:
     async def _expire_evidence(self, evidence: Evidence, expired_at: datetime) -> bool:
         artifacts = await self._repository.visual_artifacts_for_evidence(evidence.id)
         paths = {evidence.file_path, *(artifact.file_path for artifact in artifacts)} - {""}
+        if (
+            evidence.metadata.get("format") == "hls-fmp4"
+            and evidence.file_path
+            and evidence.episode_id
+            and not evidence.file_path.startswith("expired:")
+        ):
+            bundle_root = Path(evidence.file_path).parent.resolve()
+            expected_root = Path(
+                self._data_dir,
+                "episodes",
+                evidence.episode_id,
+                "recordings",
+                evidence.id,
+            ).resolve()
+            if bundle_root == expected_root:
+                paths.add(str(bundle_root))
         if self._contains_active_path(paths):
             return False
 
@@ -236,11 +252,14 @@ class RetentionService:
 
     @staticmethod
     async def _remove_paths(paths: set[str]) -> None:
-        for path in sorted(paths):
+        for path in sorted(paths, key=lambda value: len(Path(value).parts), reverse=True):
             if path.startswith("expired:"):
                 continue
             try:
-                await asyncio.to_thread(os.remove, path)
+                if os.path.isdir(path):
+                    await asyncio.to_thread(shutil.rmtree, path)
+                else:
+                    await asyncio.to_thread(os.remove, path)
             except FileNotFoundError:
                 continue
 

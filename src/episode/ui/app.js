@@ -10,7 +10,7 @@ import {
   evidence,
   evidenceDetail,
   event,
-} from "./review-pages.js?v=13";
+} from "./review-pages.js?v=14";
 import { startSidebar } from "./sidebar.js?v=3";
 import { startRetentionPolicy } from "./retention-policy.js?v=1";
 import { toggleCollapse } from "./view.js?v=1";

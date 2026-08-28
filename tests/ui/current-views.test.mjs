@@ -6,6 +6,7 @@ const moduleUrl = source =>
   "data:text/javascript;base64," + Buffer.from(source).toString("base64");
 const domUrl = moduleUrl('export const escHtml = value => String(value).replaceAll("<", "&lt;").replaceAll(">", "&gt;");');
 const apiUrl = moduleUrl("export async function api() { return []; }");
+const mediaUrl = moduleUrl("export function attachMediaSource() { return () => {}; }");
 const source = await readFile(
   new URL("../../src/episode/ui/current-views.js", import.meta.url),
   "utf8",
@@ -13,7 +14,8 @@ const source = await readFile(
 const currentViewsUrl = moduleUrl(
   source
     .replace('"./api.js?v=3"', JSON.stringify(apiUrl))
-    .replace('"./dom.js"', JSON.stringify(domUrl)),
+    .replace('"./dom.js"', JSON.stringify(domUrl))
+    .replace('"./media-player.js?v=1"', JSON.stringify(mediaUrl)),
 );
 const { renderCurrentViews } = await import(currentViewsUrl);
 
@@ -38,7 +40,7 @@ test("current view panel distinguishes refreshing and unavailable recordings", (
   assert.match(html, /Current views/);
   assert.match(html, /data-preview-url="\/api\/v1\/preview"/);
   assert.match(html, /Preview unavailable/);
-  assert.match(html, /no preview is stored/);
+  assert.match(html, /recording already being captured/);
 });
 
 test("current view labels are escaped", () => {

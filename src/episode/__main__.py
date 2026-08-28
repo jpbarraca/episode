@@ -60,7 +60,7 @@ class Application:
             self._repo,
             self._bus,
             config.data_dir,
-            segment_seconds=config.actions.recording.segment_seconds,
+            fragment_seconds=config.actions.recording.fragment_seconds,
             media=self._media,
         )
         self._thumbnails = ThumbnailCache(Path(config.data_dir) / "cache" / "thumbnails")
@@ -118,6 +118,7 @@ class Application:
             current_views=self._current_views,
             thumbnail_cache=self._thumbnails,
             retention=self._retention,
+            recorder=self._recorder,
         )
         register_plugins_api(self._fastapi_app, self._plugins)
 

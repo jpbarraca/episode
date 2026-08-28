@@ -73,3 +73,7 @@ export function episodeRailTime(value, now = new Date()) {
         hourCycle: "h23",
       });
 }
+
+export function episodeDisplayEnd(episode) {
+  return episode?.end_time || episode?.last_event_time || null;
+}

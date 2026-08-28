@@ -7,7 +7,7 @@ const source = await readFile(
   "utf8",
 );
 const moduleUrl = "data:text/javascript;base64," + Buffer.from(source).toString("base64");
-const { episodeRailTime, groupEpisodesByTime } = await import(moduleUrl);
+const { episodeDisplayEnd, episodeRailTime, groupEpisodesByTime } = await import(moduleUrl);
 
 test("episodes are grouped into useful non-overlapping chronological periods", () => {
   const now = new Date("2026-08-20T12:00:00Z");
@@ -50,4 +50,15 @@ test("timeline time formatting handles invalid values", () => {
   const formatted = episodeRailTime(afternoon, new Date(2026, 7, 20, 18));
   assert.match(formatted, /15:01/);
   assert.doesNotMatch(formatted, /AM|PM/i);
+});
+
+test("closed Episode ranges end when the Episode closes, not at its last Event", () => {
+  const episode = {
+    end_time: "2026-08-28T11:52:05Z",
+    last_event_time: "2026-08-28T11:51:32Z",
+  };
+
+  assert.equal(episodeDisplayEnd(episode), episode.end_time);
+  assert.equal(episodeDisplayEnd({ last_event_time: episode.last_event_time }), episode.last_event_time);
+  assert.equal(episodeDisplayEnd({}), null);
 });

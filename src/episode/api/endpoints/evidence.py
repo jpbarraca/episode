@@ -1,15 +1,26 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 from episode.api.context import ApiContext
 from episode.api.errors import PUBLIC_ERROR_RESPONSES
 from episode.api.pagination import DEFAULT_LIMIT, PageLimit, PageOffset
 from episode.api.projections import event_annotations, public_evidence
 from episode.api.schemas import ClosestEventResponse, EvidenceResponse
+from episode.recording.hls import HLSRecordingBundle
+
+
+def _component_media_type(path: Path) -> str:
+    return {
+        ".m3u8": "application/vnd.apple.mpegurl",
+        ".m4s": "video/iso.segment",
+        ".mp4": "video/mp4",
+        ".json": "application/json",
+    }.get(path.suffix.lower(), "application/octet-stream")
 
 
 def evidence_router(context: ApiContext) -> APIRouter:
@@ -102,7 +113,43 @@ def evidence_router(context: ApiContext) -> APIRouter:
             raise HTTPException(410, "Evidence expired under the retention policy")
         if not os.path.exists(evidence.file_path):
             raise HTTPException(404, "File not found on disk")
+        if evidence.metadata.get("format") == "hls-fmp4":
+            return RedirectResponse(
+                f"/api/v1/recordings/{evidence.id}/index.m3u8",
+                status_code=307,
+            )
         return FileResponse(evidence.file_path, media_type=evidence.mime_type)
+
+    @router.get("/recordings/{evidence_id}/{component_path:path}")
+    async def serve_recording_component(evidence_id: str, component_path: str):
+        allowed = component_path in {"index.m3u8", "init.mp4", "manifest.json"} or (
+            component_path.startswith("segments/") and component_path.endswith(".m4s")
+        )
+        if not allowed:
+            raise HTTPException(404, "Recording component not found")
+        bundle = context.recorder.active_bundle(evidence_id) if context.recorder else None
+        active = bundle is not None
+        if bundle is None:
+            evidence = await repo.get_evidence(evidence_id)
+            if not evidence:
+                raise HTTPException(404, "Recording not found")
+            if evidence.availability == "expired":
+                raise HTTPException(410, "Recording expired under the retention policy")
+            if evidence.metadata.get("format") != "hls-fmp4":
+                raise HTTPException(404, "Recording is not an HLS bundle")
+            try:
+                bundle = HLSRecordingBundle.load_from_evidence(Path(evidence.file_path), evidence)
+            except (KeyError, TypeError, ValueError) as error:
+                raise HTTPException(404, "Recording bundle metadata is incomplete") from error
+        path = bundle.resolve_component(component_path)
+        if path is None:
+            raise HTTPException(404, "Recording component not found")
+        headers = (
+            {"Cache-Control": "no-store"}
+            if active or path.suffix == ".m3u8"
+            else {"Cache-Control": "private, max-age=31536000, immutable"}
+        )
+        return FileResponse(path, media_type=_component_media_type(path), headers=headers)
 
     @router.get("/evidence/{evidence_id}/thumbnail")
     async def serve_evidence_thumbnail(evidence_id: str):

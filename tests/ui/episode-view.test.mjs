@@ -21,13 +21,18 @@ const componentsUrl = moduleUrl(
     .replace('"./dom.js"', JSON.stringify(domUrl))
     .replace('"./format.js?v=3"', JSON.stringify(formatUrl)),
 );
+const mediaUrl = moduleUrl(
+  "export function attachMediaSource() { return () => {}; } "
+  + "export function evidenceMediaUrl() { return '/media'; }",
+);
 const episodeViewUrl = moduleUrl(
   (await uiFile("episode-view.js"))
     .replace('"./api.js?v=3"', JSON.stringify(apiUrl))
-    .replace('"./components.js?v=5"', JSON.stringify(componentsUrl))
+    .replace('"./components.js?v=6"', JSON.stringify(componentsUrl))
     .replace('"./dom.js"', JSON.stringify(domUrl))
     .replace('"./format.js?v=3"', JSON.stringify(formatUrl))
-    .replace('"./timeline.js?v=5"', JSON.stringify(timelineUrl)),
+    .replace('"./timeline.js?v=5"', JSON.stringify(timelineUrl))
+    .replace('"./media-player.js?v=1"', JSON.stringify(mediaUrl)),
 );
 const { renderEpisodeWorkspace } = await import(episodeViewUrl);
 

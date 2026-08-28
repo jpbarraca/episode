@@ -107,11 +107,11 @@ notes, and run
 `docker compose --env-file .env pull` followed by
 `docker compose --env-file .env up -d`.
 
-During shutdown Episode signals all active FFmpeg processes together and gives
-them a bounded grace period to finalize their current segments. On startup it
-validates leftover `.mp4.part` files: playable media becomes recording Evidence,
-invalid media is preserved as explicit incomplete Evidence, and capture resumes
-with a new session when a persisted Episode is still active.
+During shutdown Episode signals all active FFmpeg processes together and leaves
+their HLS bundles explicitly recoverable. On startup, capture can continue in
+the same logical recording bundle with a discontinuity marker when the Episode
+is still active; otherwise the bundle is finalized as one Evidence item. Legacy
+`.mp4.part` files are still reconciled as recording or incomplete Evidence.
 
 ### Area recording
 
@@ -132,11 +132,27 @@ explicit activity window. Inactive observations are retained but never shorten
 or extend the deadline, and duplicate connector deliveries do not start
 recordings.
 
-Long recordings are finalized as immutable, sync-friendly segments while capture
-continues through the same FFmpeg connection. Set
-`actions.recording.segment_seconds` to control their length (default: 600 seconds).
-The final partial segment is closed when the Episode closes; this setting limits
-file size, not the Episode or recording duration.
+Recordings are captured as rolling HLS/fMP4 bundles. Each camera contributes one
+logical Evidence item to an Episode, backed by a playlist, initialization file,
+small immutable media fragments, and a checksummed component manifest. This
+allows playback while an Episode is active without exposing camera credentials,
+and keeps the whole recording portable inside its Episode folder.
+
+`actions.recording.fragment_seconds` controls the target fragment duration
+(default: 4 seconds). Camera keyframe intervals can make individual fragments
+slightly longer. This setting affects playback latency and file granularity; it
+does not limit the Episode or recording duration. Existing MP4 recordings remain
+playable.
+
+The UI uses native HLS where the browser provides it and a pinned hls.js light
+build from jsDelivr as the fallback. The external script is protected by a
+Subresource Integrity hash; browsers without native HLS require internet access
+to load this fallback player.
+H.264 video with AAC audio has the broadest browser support. HEVC/H.265 streams
+are preserved without transcoding and play only where the browser and operating
+system expose an HEVC decoder. A compatibility transcode or proxy would be a
+separate presentation artifact, never a replacement for the preserved
+recording.
 
 ### Network access
 
@@ -224,7 +240,7 @@ inventory—are ignored by Git and must never be committed.
 
 ## Project status
 
-Episode `0.1.0-beta.3` is a working ONVIF-first public beta for technical
+Episode `0.1.0-beta.4` is a working ONVIF-first public beta for technical
 self-hosters using IP cameras and Docker. Hikvision integrations provide
 optional enrichment. The current priorities are reliable preservation, correct
 correlation, simple installation, and an uncluttered Episode-first interface.

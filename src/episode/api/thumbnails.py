@@ -50,7 +50,9 @@ class ThumbnailCache:
 
     @staticmethod
     def _is_supported(evidence: Evidence) -> bool:
-        return evidence.mime_type.startswith(("image/", "video/"))
+        return evidence.mime_type.startswith(("image/", "video/")) or (
+            evidence.evidence_type == "recording" and evidence.metadata.get("format") == "hls-fmp4"
+        )
 
     @staticmethod
     def _cache_key(evidence: Evidence) -> str:

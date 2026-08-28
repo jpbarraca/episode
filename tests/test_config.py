@@ -15,19 +15,19 @@ def test_onvif_snapshot_action_can_be_enabled_explicitly():
     assert config.actions.snapshot.enabled is True
 
 
-def test_recording_segments_default_to_ten_minutes():
-    assert EpisodeConfig().actions.recording.segment_seconds == 600
+def test_recording_fragments_default_to_four_seconds():
+    assert EpisodeConfig().actions.recording.fragment_seconds == 4
 
 
-def test_recording_segment_duration_can_be_configured():
-    config = EpisodeConfig(actions={"recording": {"segment_seconds": 120}})
+def test_recording_fragment_duration_can_be_configured():
+    config = EpisodeConfig(actions={"recording": {"fragment_seconds": 6}})
 
-    assert config.actions.recording.segment_seconds == 120
+    assert config.actions.recording.fragment_seconds == 6
 
 
-def test_recording_segment_duration_must_be_positive():
-    with pytest.raises(ValueError, match="segment_seconds must be greater than zero"):
-        EpisodeConfig(actions={"recording": {"segment_seconds": 0}})
+def test_recording_fragment_duration_must_be_bounded():
+    with pytest.raises(ValueError, match="fragment_seconds must be between 1 and 30"):
+        EpisodeConfig(actions={"recording": {"fragment_seconds": 0}})
 
 
 def test_obsolete_inventory_configuration_is_rejected(tmp_path):

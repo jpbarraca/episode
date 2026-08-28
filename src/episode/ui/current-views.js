@@ -1,17 +1,23 @@
 import { api } from "./api.js?v=3";
 import { escHtml } from "./dom.js";
+import { attachMediaSource } from "./media-player.js?v=1";
 
 let refreshTimer = null;
 let refreshGeneration = 0;
+let streamDetachers = [];
 
 function viewCard(view) {
-  const available = view.mode === "snapshot" && view.image_url;
+  const streamAvailable = view.mode === "hls" && view.stream_url;
+  const snapshotAvailable = view.mode === "snapshot" && view.image_url;
+  const available = streamAvailable || snapshotAvailable;
   return `<article class="current-view-card ${available ? "is-loading" : "is-unavailable"}" data-device-id="${escHtml(view.device_id)}">
     <div class="current-view-frame">
-      ${available
+      ${streamAvailable
+        ? `<video muted autoplay playsinline controls data-stream-url="${escHtml(view.stream_url)}"></video>`
+        : snapshotAvailable
         ? `<img alt="Current view from ${escHtml(view.device_name)}" data-preview-url="${escHtml(view.image_url)}">`
         : '<div class="current-view-unavailable"><img src="/logo.svg" alt=""><span>Preview unavailable</span></div>'}
-      <span class="current-view-live"><i></i>${available ? "Current" : "Recording"}</span>
+      <span class="current-view-live"><i></i>${streamAvailable ? "Live" : available ? "Current" : "Recording"}</span>
     </div>
     <div class="current-view-caption">
       <strong>${escHtml(view.device_name)}</strong>
@@ -36,14 +42,30 @@ export function renderCurrentViews(views) {
         <span class="eyebrow">Happening now</span>
         <h3 id="current-views-title">Current views</h3>
       </div>
-      <span class="current-views-note">Refreshes automatically · no preview is stored</span>
+      <span class="current-views-note">Streams from the recording already being captured</span>
     </div>
     <div id="current-view-grid" class="current-view-grid">${viewsMarkup(views)}</div>
   </section>`;
 }
 
 function signature(views) {
-  return views.map(view => `${view.device_id}:${view.mode}`).join("|");
+  return views.map(view => `${view.device_id}:${view.mode}:${view.stream_url || ""}`).join("|");
+}
+
+function attachStreams() {
+  streamDetachers.forEach(detach => detach());
+  streamDetachers = [];
+  document.querySelectorAll("#current-view-grid video[data-stream-url]").forEach(video => {
+    video.addEventListener("playing", () => {
+      video.closest(".current-view-card")?.classList.remove("is-loading", "has-error");
+    });
+    video.addEventListener("error", () => {
+      video.closest(".current-view-card")?.classList.add("has-error");
+    });
+    streamDetachers.push(
+      attachMediaSource(video, video.dataset.streamUrl, { live: true }),
+    );
+  });
 }
 
 function loadPreview(image, generation) {
@@ -94,7 +116,10 @@ async function refresh(episodeId, generation, previousSignature, intervalSeconds
   let nextSignature = previousSignature;
   if (grid && views) {
     nextSignature = signature(views);
-    if (nextSignature !== previousSignature) grid.innerHTML = viewsMarkup(views, ended);
+    if (nextSignature !== previousSignature) {
+      grid.innerHTML = viewsMarkup(views, ended);
+      attachStreams();
+    }
   }
   document.querySelectorAll("#current-view-grid img[data-preview-url]")
     .forEach(image => loadPreview(image, generation));
@@ -116,6 +141,7 @@ export function activateCurrentViews(episodeId, initialViews) {
   );
   document.querySelectorAll("#current-view-grid img[data-preview-url]")
     .forEach(image => loadPreview(image, generation));
+  attachStreams();
   refreshTimer = window.setTimeout(
     () => refresh(episodeId, generation, signature(initialViews), interval),
     interval * 1000,
@@ -124,6 +150,8 @@ export function activateCurrentViews(episodeId, initialViews) {
 
 export function deactivateCurrentViews() {
   refreshGeneration += 1;
+  streamDetachers.forEach(detach => detach());
+  streamDetachers = [];
   if (refreshTimer !== null) window.clearTimeout(refreshTimer);
   refreshTimer = null;
 }

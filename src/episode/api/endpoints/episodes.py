@@ -56,22 +56,37 @@ def episodes_router(context: ApiContext) -> APIRouter:
             return []
 
         result = []
+        active_recordings = {
+            item["device_id"]: item
+            for item in (context.recorder.active_recordings(episode_id) if context.recorder else ())
+        }
         for view in context.current_views.describe(episode_id):
             device = await repo.get_device(view.device_id)
-            available = view.mode == "snapshot"
+            recording = active_recordings.get(view.device_id)
+            if recording and not recording.get("ready"):
+                recording = None
+            mode = "hls" if recording else view.mode
+            available = mode == "snapshot"
             result.append(
                 {
                     "device_id": view.device_id,
                     "device_name": device.name if device else view.device_id,
-                    "mode": view.mode,
+                    "mode": mode,
                     "refresh_interval_seconds": view.refresh_interval_seconds,
                     "image_url": (
                         f"/api/v1/episodes/{episode_id}/current-views/{view.device_id}"
                         if available
                         else None
                     ),
+                    "stream_url": (
+                        f"/api/v1/recordings/{recording['evidence_id']}/index.m3u8"
+                        if recording
+                        else None
+                    ),
                     "summary": (
-                        "Refreshing while this Device records"
+                        "Streaming the recording as it is captured"
+                        if recording
+                        else "Refreshing while this Device records"
                         if available
                         else "Recording continues without a preview provider"
                     ),

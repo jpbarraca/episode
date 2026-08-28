@@ -200,7 +200,7 @@ class OperationalView:
                 "metrics": {
                     "active_recordings": int(recorder.get("active_recordings", 0)),
                     "cameras": int(recorder.get("cameras", 0)),
-                    "segment_seconds": int(recorder.get("segment_seconds", 0)),
+                    "fragment_seconds": int(recorder.get("fragment_seconds", 0)),
                 },
             },
             {

@@ -6,7 +6,7 @@
   "log_level": "INFO",
   "actions": {
     "recording": {
-      "segment_seconds": 600
+      "fragment_seconds": 4
     },
     "snapshot": {
       "enabled": false

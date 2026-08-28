@@ -1,5 +1,5 @@
 import { API } from "./api.js?v=3";
-import { eventSourceBadges } from "./components.js?v=5";
+import { eventSourceBadges } from "./components.js?v=6";
 import { $, $$, escHtml } from "./dom.js";
 import { fmtDuration, fmtTime, titleCase, trunc } from "./format.js?v=3";
 import {
@@ -7,6 +7,7 @@ import {
   detectionForMoment,
   eventTitle,
 } from "./timeline.js?v=5";
+import { attachMediaSource, evidenceMediaUrl } from "./media-player.js?v=1";
 
 function secondsLabel(milliseconds) {
   const seconds = Math.max(0, Math.round(milliseconds / 1000));
@@ -260,7 +261,7 @@ export function activateEpisodeWorkspace(model, episode, deviceNames = new Map()
     );
     stage.innerHTML = `<div class="episode-video-stage">
       <video id="episode-recording-player"
-        src="${API}/evidence/${recording.id}/file" controls preload="metadata"></video>
+        controls preload="metadata"></video>
       <svg id="episode-video-overlay" viewBox="0 0 1 1" preserveAspectRatio="none"
           aria-label="Detection region">
         <rect></rect>
@@ -271,6 +272,7 @@ export function activateEpisodeWorkspace(model, episode, deviceNames = new Map()
     playhead.textContent = fmtTime(targetTime || recording.bounds.start);
     setActiveMedia(recording.id);
     const player = $("#episode-recording-player");
+    const detachSource = attachMediaSource(player, evidenceMediaUrl(recording));
     const videoStage = stage.querySelector(".episode-video-stage");
     const overlay = $("#episode-video-overlay");
     const overlayBox = overlay.querySelector("rect");
@@ -312,6 +314,7 @@ export function activateEpisodeWorkspace(model, episode, deviceNames = new Map()
     };
     overlayEnabled.addEventListener("change", onOverlayChange);
     clearMedia = () => {
+      detachSource();
       resizeObserver.disconnect();
       overlayEnabled.removeEventListener("change", onOverlayChange);
     };

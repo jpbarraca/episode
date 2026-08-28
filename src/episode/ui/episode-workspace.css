@@ -460,7 +460,8 @@
   overflow: hidden;
   position: relative;
 }
-.current-view-frame > img {
+.current-view-frame > img,
+.current-view-frame > video {
   height: 100%;
   object-fit: cover;
   width: 100%;

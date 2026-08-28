@@ -168,9 +168,10 @@ class EpisodeResponse(ApiModel):
 class CurrentViewResponse(ApiModel):
     device_id: str
     device_name: str
-    mode: Literal["snapshot", "unavailable"]
+    mode: Literal["hls", "snapshot", "unavailable"]
     refresh_interval_seconds: int
     image_url: str | None = None
+    stream_url: str | None = None
     summary: str
 
 

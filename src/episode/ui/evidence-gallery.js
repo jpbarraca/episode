@@ -1,10 +1,12 @@
 import { API, api } from "./api.js?v=3";
 import { $, escHtml } from "./dom.js";
 import { fmtBytes, fmtShort, fmtTime, plural, titleCase, trunc } from "./format.js?v=3";
+import { attachMediaSource, evidenceMediaUrl, isHlsEvidence } from "./media-player.js?v=1";
 
 let carouselItems = [];
 let carouselIndex = 0;
 let boundingBoxRequest = 0;
+let carouselDetach = () => {};
 
 export function originBadge(evidence) {
   const origin = evidence.metadata?.origin || evidence.evidence_type;
@@ -40,7 +42,7 @@ function renderExpiredEvidence(evidence) {
 }
 
 function renderEvidenceItem(evidence, index) {
-  const isVideo = evidence.mime_type?.startsWith("video/");
+  const isVideo = evidence.mime_type?.startsWith("video/") || isHlsEvidence(evidence);
   const isImage = evidence.mime_type?.startsWith("image/");
   const isExpired = evidence.availability === "expired";
   const duration = evidence.metadata?.duration_seconds;
@@ -108,7 +110,7 @@ function renderEvidenceBundle(group, items, deviceNames, areaNames) {
     <div class="evidence-archive-grid">
       ${group.evidence.map(evidence => {
         const index = items.indexOf(evidence);
-        const isVideo = evidence.mime_type?.startsWith("video/");
+        const isVideo = evidence.mime_type?.startsWith("video/") || isHlsEvidence(evidence);
         const isImage = evidence.mime_type?.startsWith("image/");
         const isExpired = evidence.availability === "expired";
         const deviceName = deviceNames.get(evidence.device_id) || evidence.device_id;
@@ -122,7 +124,7 @@ function renderEvidenceBundle(group, items, deviceNames, areaNames) {
             <div class="evidence-device"><svg><use href="icons.svg?v=2#devices"></use></svg><strong>${escHtml(deviceName || "Unknown Device")}</strong></div>
             <div class="evidence-item-meta">
               <span title="Captured"><svg><use href="icons.svg?v=2#clock"></use></svg>${fmtShort(evidence.timestamp)}</span>
-              <span title="File size"><svg><use href="icons.svg?v=2#file"></use></svg>${fmtBytes(evidence.byte_size)}</span>
+              <span title="${isHlsEvidence(evidence) ? "Recording bundle size" : "File size"}"><svg><use href="icons.svg?v=2#file"></use></svg>${fmtBytes(evidence.byte_size)}</span>
             </div>
             <div class="evidence-archive-links">
               <a href="#evidence/${evidence.id}" onclick="event.stopPropagation()">Details</a>
@@ -177,6 +179,8 @@ export function renderEpisodeEvidence(list) {
 }
 
 function stopCurrentMedia() {
+  carouselDetach();
+  carouselDetach = () => {};
   const slide = $("#carousel-slide");
   for (const element of slide.querySelectorAll("video, audio")) {
     element.pause();
@@ -190,14 +194,14 @@ function renderCarousel() {
   if (!evidence) return;
   stopCurrentMedia();
 
-  const isVideo = evidence.mime_type?.startsWith("video/");
+  const isVideo = evidence.mime_type?.startsWith("video/") || isHlsEvidence(evidence);
   const isImage = evidence.mime_type?.startsWith("image/");
   const isExpired = evidence.availability === "expired";
   let mediaHtml = "";
   if (isExpired) {
     mediaHtml = `<div class="carousel-file-preview"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
   } else if (isVideo) {
-    mediaHtml = `<video src="${API}/evidence/${evidence.id}/file" controls autoplay></video>`;
+    mediaHtml = `<video controls autoplay></video>`;
   } else if (isImage) {
     mediaHtml = `<div class="carousel-image-frame">
       <img src="${API}/evidence/${evidence.id}/file" alt="">
@@ -212,6 +216,12 @@ function renderCarousel() {
   }
 
   $("#carousel-slide").innerHTML = mediaHtml;
+  if (!isExpired && isVideo) {
+    carouselDetach = attachMediaSource(
+      $("#carousel-slide").querySelector("video"),
+      evidenceMediaUrl(evidence),
+    );
+  }
   $("#carousel-title").textContent = titleCase(evidence.evidence_type);
   $("#carousel-counter").textContent = `${carouselIndex + 1} of ${carouselItems.length}`;
   $("#carousel-prev").disabled = carouselItems.length < 2;

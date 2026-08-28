@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -97,8 +98,11 @@ async def _recover_path(
     target_dir = Path(data_dir) / "episodes" / episode_id / subdir
     current = Path(recorded_path)
     if current.is_file():
-        if current.parent == target_dir:
+        try:
+            current.relative_to(target_dir)
             return str(current)
+        except ValueError:
+            pass
         return await async_move_to_episode(data_dir, episode_id, str(current), subdir)
     return await asyncio.to_thread(
         _find_relocated_file,
@@ -106,6 +110,37 @@ async def _recover_path(
         recorded_path,
         checksum,
     )
+
+
+async def _recover_hls_entrypoint(
+    data_dir: str,
+    episode_id: str,
+    evidence_id: str,
+    recorded_path: str,
+    checksum: str,
+) -> str | None:
+    """Keep an HLS entrypoint beside the bundle components it references."""
+
+    if not evidence_id or Path(evidence_id).name != evidence_id or evidence_id in {".", ".."}:
+        return None
+    recordings_dir = Path(data_dir) / "episodes" / episode_id / "recordings"
+    bundle_root = recordings_dir / evidence_id
+    expected = bundle_root / "index.m3u8"
+    if expected.is_file() and _checksum_matches(expected, checksum):
+        return str(expected)
+
+    current = Path(recorded_path)
+    if (
+        not current.is_file()
+        or not bundle_root.is_dir()
+        or not _checksum_matches(current, checksum)
+    ):
+        return None
+    if expected.exists():
+        return None
+
+    await asyncio.to_thread(os.replace, current, expected)
+    return str(expected)
 
 
 async def reconcile_episode_paths(
@@ -162,7 +197,7 @@ async def reconcile_episode_paths(
         repaired_artifacts.add(row["id"])
 
     evidence_rows = await connection.execute_fetchall(
-        """SELECT e.id, e.episode_id, e.evidence_type, e.file_path,
+        """SELECT e.id, e.episode_id, e.evidence_type, e.file_path, e.metadata,
                   e.sha256, e.artifact_id, a.file_path AS artifact_path,
                   a.sha256 AS artifact_sha256
            FROM evidence e
@@ -173,13 +208,26 @@ async def reconcile_episode_paths(
     for row in evidence_rows:
         recorded = row["artifact_path"] or row["file_path"]
         checksum = row["artifact_sha256"] or row["sha256"] or ""
-        recovered = await _recover_path(
-            data_dir,
-            row["episode_id"],
-            _evidence_subdir(row["evidence_type"]),
-            recorded,
-            checksum,
-        )
+        try:
+            metadata = json.loads(row["metadata"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            metadata = {}
+        if metadata.get("format") == "hls-fmp4":
+            recovered = await _recover_hls_entrypoint(
+                data_dir,
+                row["episode_id"],
+                row["id"],
+                recorded,
+                checksum,
+            )
+        else:
+            recovered = await _recover_path(
+                data_dir,
+                row["episode_id"],
+                _evidence_subdir(row["evidence_type"]),
+                recorded,
+                checksum,
+            )
         if not recovered:
             logger.warning(
                 "Evidence %s points to a missing file and could not be reconciled",

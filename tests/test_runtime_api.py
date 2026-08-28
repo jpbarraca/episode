@@ -129,7 +129,7 @@ def _operations() -> OperationalView:
             "running": True,
             "active_recordings": 1,
             "cameras": 1,
-            "segment_seconds": 600,
+            "fragment_seconds": 4,
         },
         snapshot_status=lambda: {
             "running": False,
@@ -369,6 +369,7 @@ async def test_episode_api_projects_the_first_active_event_as_its_trigger(tmp_pa
             ("camera-front", "front"),
             ("camera-garden", "garden"),
             ("operator", "garage"),
+            ("access-panel", "garage"),
         ):
             await repository.upsert_device(
                 Device(id=device_id, name=device_id, device_type="camera", area_id=area_id)
@@ -388,7 +389,12 @@ async def test_episode_api_projects_the_first_active_event_as_its_trigger(tmp_pa
             primary_area_id="garage",
             start_time=started + timedelta(minutes=2),
         )
-        for episode in (doorbell_episode, motion_episode, manual_episode):
+        access_episode = Episode(
+            id="access-episode",
+            primary_area_id="garage",
+            start_time=started + timedelta(minutes=3),
+        )
+        for episode in (doorbell_episode, motion_episode, manual_episode, access_episode):
             await repository.create_episode(episode)
 
         await repository.create_event(
@@ -431,6 +437,16 @@ async def test_episode_api_projects_the_first_active_event_as_its_trigger(tmp_pa
                 episode_id=manual_episode.id,
             )
         )
+        await repository.create_event(
+            Event(
+                device_id="access-panel",
+                area_id="garage",
+                timestamp=started + timedelta(minutes=3),
+                event_type="door_access",
+                event_state="active",
+                episode_id=access_episode.id,
+            )
+        )
 
         transport = httpx.ASGITransport(app=create_api(repository, config.data_dir))
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -439,6 +455,7 @@ async def test_episode_api_projects_the_first_active_event_as_its_trigger(tmp_pa
 
         triggers = {episode["id"]: episode["trigger_type"] for episode in episodes}
         assert triggers == {
+            "access-episode": "access",
             "doorbell-episode": "doorbell",
             "motion-episode": "motion",
             "manual-episode": "manual",

@@ -158,9 +158,9 @@ plugin cannot indefinitely block later integrations or application cleanup.
 
 At startup, the Episode engine closes persisted active Episodes whose minimum
 deadline has passed. After plugins restore media registrations, the recording
-engine reconstructs targets for Episodes whose deadline remains in the future
-and resumes capture with new recording sessions rather than pretending file
-continuity.
+engine reconstructs targets for Episodes whose deadline remains in the future.
+An interrupted HLS recording resumes in its existing Evidence workspace with an
+explicit playlist discontinuity; it does not create a second logical recording.
 
 
 ## Persistence model
@@ -228,6 +228,12 @@ data/episodes/<episode-id>/
 ├── events/
 ├── snapshots/
 ├── recordings/
+│   └── <evidence-id>/
+│       ├── index.m3u8
+│       ├── init.mp4
+│       ├── manifest.json
+│       └── segments/
+│           └── segment-000000.m4s
 ├── other/
 └── timelapses/
 ```
@@ -258,20 +264,33 @@ any time. The thumbnail cache has no storage
 repository dependency and cannot mutate or delete Evidence, Raw Artifacts,
 receipts, manifests, journals, or Episode bundle contents.
 
-Recordings remain active for the Episode lifecycle and are stored as sequential,
-immutable segments. A shared `recording_session_id` and ordered `segment_index`
-identify chunks from one continuous recording action without relying on filename
-interpretation. On shutdown Episode signals all active FFmpeg processes before
-awaiting them, so concurrent cameras share one bounded grace period. Startup
-validates leftover `.mp4.part` files: playable segments are finalized as
-recording Evidence, invalid segments are preserved as explicit incomplete
-Evidence, and every outcome is journaled.
+Each participating camera creates one logical recording Evidence item for the
+Episode. Its filesystem bundle contains an event-style HLS playlist, fMP4
+initialization data, small immutable media fragments, and a dedicated atomic
+component manifest. The component manifest inventories every fragment with its
+sequence, observed timestamp and duration when available, byte length, and
+SHA-256 checksum. Individual fragments are implementation components: they do
+not become Evidence rows or UI cards.
+
+The workspace exists while capture is active, but the Evidence row is published
+only after finalization. On shutdown Episode signals all active FFmpeg processes
+before awaiting them, preserving each workspace for recovery. A restart resumes
+the same bundle with a playlist discontinuity when its Episode is still active;
+otherwise it finalizes the bundle. Legacy `.mp4.part` files retain their
+compatibility recovery path.
+
+The recording action copies the camera video bitstream and transcodes audio to
+AAC when present; it does not silently transcode video Evidence for browser
+compatibility. The UI uses native HLS first and a pinned, integrity-checked
+hls.js CDN fallback. H.264 is broadly playable, while HEVC playback remains
+dependent on browser and operating-system decoder support. Future compatibility
+proxies or transcodes must be separate derived presentation artifacts.
 
 One global visual Evidence retention policy defaults to an active but
 unconfirmed 30-day period and is managed from the System UI. An administrator
 must explicitly confirm the default, select another period, or disable automatic
 deletion. Disabled retention remains persistently visible in the UI. Startup and
-hourly cleanup remove expired video, snapshots, embedded pictures, thumbnails,
+hourly cleanup remove complete expired recording bundles, snapshots, embedded pictures, thumbnails,
 timelapses, and other Episode-managed visual copies. The canonical Evidence row,
 Raw Artifact, and portable manifest retain identity and integrity metadata while
 removing recoverable file paths. Files currently being written are deferred until
@@ -332,11 +351,11 @@ payloads. Recording targets are currently resolved from the Event source and
 Area; this boundary can accept future target strategies without changing
 connectors or recording execution.
 
-The UI's active-Episode current views are operational previews, not capture
-actions. They are limited to Devices actively recording that Episode, fetched
-through registered media providers, cached briefly across viewers, and never
-persisted as Raw Artifacts or Evidence. A missing preview provider does not
-affect recording health.
+The UI's active-Episode current views are operational views of the HLS recording
+already being captured, with short-lived snapshot previews as a startup
+fallback. They are limited to Devices actively recording that Episode and never
+expose camera credentials. A missing current view does not affect recording
+health.
 
 New AI, OCR, LPR, or recognition integrations should create versioned processing
 runs and append annotations. Reprocessing must never replace prior results or

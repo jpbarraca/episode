@@ -1,5 +1,5 @@
 import { api } from "./api.js?v=3";
-import { episodeStateBadge } from "./components.js?v=5";
+import { episodeStateBadge } from "./components.js?v=6";
 import { $ } from "./dom.js";
 import { plural, trunc } from "./format.js?v=3";
 

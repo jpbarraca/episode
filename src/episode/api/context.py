@@ -28,6 +28,7 @@ class ApiContext:
     current_views: CurrentViewService | None = None
     thumbnails: ThumbnailCache | None = None
     retention: RetentionService | None = None
+    recorder: Any | None = None
 
     def __post_init__(self) -> None:
         if self.timelapses is None:

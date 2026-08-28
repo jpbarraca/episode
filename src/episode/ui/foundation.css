@@ -226,6 +226,7 @@ main {
 .badge-human { background: color-mix(in srgb, var(--brand-blue) 20%, transparent); color: var(--brand-blue); }
 .badge-vehicle { background: color-mix(in srgb, var(--brand-purple) 20%, transparent); color: var(--brand-purple); }
 .badge-doorbell { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+.badge-access { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }
 .badge-gate { background: color-mix(in srgb, var(--success) 20%, transparent); color: var(--success); }
 .badge-manual { background: color-mix(in srgb, var(--info) 20%, transparent); color: var(--info); }
 .badge-system { background: color-mix(in srgb, var(--text-muted) 20%, transparent); color: var(--text-muted); }

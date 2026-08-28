@@ -103,12 +103,20 @@ cleanup pass. A disabled policy does not delete Evidence and reports
 `policy_state: "disabled"` so clients can keep the condition visible.
 
 Active Episodes expose `/episodes/{episode_id}/current-views` as a small
-operational projection of Devices currently recording that Episode. Snapshot
-URLs returned by that collection are short-lived views fetched through Episode;
-they never expose Device credentials and are not Raw Artifacts or Evidence.
-Devices without a registered snapshot provider remain in the collection with
+operational projection of Devices currently recording that Episode. Once the
+first recording fragment is ready, `mode: "hls"` provides a local
+`stream_url`; before then, a registered snapshot provider may supply
+`mode: "snapshot"`. Neither response exposes Device credentials. Devices
+without a ready stream or snapshot provider remain in the collection with
 `mode: "unavailable"` so preview support is never confused with recording
 health.
+
+HLS recording playlists and components are served from
+`/recordings/{evidence_id}/{component_path}`. Active playlists are never
+cached; finalized media fragments are immutable and may be cached. The route
+only exposes the known playlist, initialization file, component manifest, and
+media-fragment paths within the exact recording bundle. Legacy MP4 Evidence
+continues to use `/evidence/{evidence_id}/file`.
 
 Device detail exposes `capture_policy.activity_window_seconds`. An active
 Event from that Device contributes this minimum duration to its Episode.

@@ -7,13 +7,20 @@ import os
 import re
 import subprocess
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from episode.domain.models import Device, EpisodeState, EventState, Evidence
 from episode.engine.bus import EventBus, Message
 from episode.engine.engine import CanonicalEventResult
+from episode.recording.hls import (
+    CAPTURE_STATE_NAME,
+    HLS_MIME_TYPE,
+    HLSCaptureState,
+    HLSRecordingBundle,
+)
 from episode.recording.targets import AreaRecordingTargetResolver, RecordingTargetResolver
 
 if TYPE_CHECKING:
@@ -32,40 +39,60 @@ class _EpisodeRecording:
     episode_id: str
     device_id: str
     area_id: str
-    output_path: str
-    working_path: str
     session_id: str
-    start_time: datetime | None = None
+    bundle: HLSRecordingBundle
+    start_time: datetime
+    rtsp_url: str = ""
     proc: asyncio.subprocess.Process | None = None
     task: asyncio.Task | None = None
-    next_segment_index: int = 0
-    segment_started_at: dict[int, datetime] = field(default_factory=dict)
     stop_reason: str | None = None
+    continued: bool = False
+    published: bool = False
+
+    @property
+    def evidence_id(self) -> str:
+        return self.bundle.state.evidence_id
+
+    @property
+    def output_path(self) -> str:
+        return str(self.bundle.playlist_path)
+
+    @property
+    def working_path(self) -> str:
+        return self.bundle.segment_pattern
+
+    @property
+    def next_segment_index(self) -> int:
+        return self.bundle.next_segment_index()
 
 
 class RecordingEngine:
+    """Capture each Device recording as one crash-recoverable HLS Evidence bundle."""
+
     def __init__(
         self,
         repo: Repository,
         bus: EventBus,
         data_dir: str,
-        segment_seconds: int = 600,
+        fragment_seconds: int = 4,
         media=None,
         target_resolver: RecordingTargetResolver | None = None,
     ):
+        if fragment_seconds <= 0:
+            raise ValueError("fragment_seconds must be greater than zero")
         self._repo = repo
         self._bus = bus
         self._data_dir = data_dir
-        if segment_seconds <= 0:
-            raise ValueError("segment_seconds must be greater than zero")
-        self._segment_seconds = segment_seconds
+        self._fragment_seconds = fragment_seconds
         self._media = media
         self._target_resolver = target_resolver or AreaRecordingTargetResolver(repo)
         self._active_tasks: set[asyncio.Task] = set()
         self._recordings: dict[tuple[str, str], _EpisodeRecording] = {}
+        self._recoverable: dict[tuple[str, str], _EpisodeRecording] = {}
         self._running = False
 
-    def _rec_key(self, episode_id: str, device_id: str) -> tuple[str, str]:
+    @staticmethod
+    def _rec_key(episode_id: str, device_id: str) -> tuple[str, str]:
         return (episode_id, device_id)
 
     @staticmethod
@@ -74,7 +101,6 @@ class RecordingEngine:
         return (value or "device")[:64]
 
     def active_device_ids(self, episode_id: str) -> tuple[str, ...]:
-        """Return Devices currently recording one Episode without exposing stream details."""
         return tuple(
             sorted(
                 recording.device_id
@@ -83,82 +109,95 @@ class RecordingEngine:
             )
         )
 
-    def active_file_paths(self) -> set[str]:
-        paths: set[str] = set()
-        for recording in self._recordings.values():
-            paths.update(path for _index, path in self._segment_entries(recording))
-        return paths
+    def active_recordings(self, episode_id: str) -> tuple[dict[str, object], ...]:
+        return tuple(
+            {
+                "evidence_id": recording.evidence_id,
+                "device_id": recording.device_id,
+                "started_at": recording.start_time,
+                "ready": recording.bundle.playlist_path.exists(),
+            }
+            for recording in self._recordings.values()
+            if recording.episode_id == episode_id
+        )
 
-    async def start(self):
+    def active_bundle(self, evidence_id: str) -> HLSRecordingBundle | None:
+        return next(
+            (
+                recording.bundle
+                for recording in self._recordings.values()
+                if recording.evidence_id == evidence_id
+            ),
+            None,
+        )
+
+    def active_file_paths(self) -> set[str]:
+        return {
+            str(path)
+            for recording in self._recordings.values()
+            for path in recording.bundle.root.rglob("*")
+            if path.is_file()
+        }
+
+    async def start(self) -> None:
         self._running = True
         self._bus.subscribe("event.canonicalized", self._on_event)
         self._bus.subscribe("episode.updated", self._on_episode_updated)
 
+    async def stop(self) -> None:
+        self._running = False
+        self._bus.unsubscribe("event.canonicalized", self._on_event)
+        self._bus.unsubscribe("episode.updated", self._on_episode_updated)
+        await self._stop_recordings(list(self._recordings.values()), reason="application_shutdown")
+        if self._active_tasks:
+            _, pending = await asyncio.wait(self._active_tasks, timeout=10)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
     async def recover_interrupted_recordings(self) -> None:
-        devices = await self._repo.list_devices(include_disabled=True)
-        devices_by_safe_id: dict[str, list[Device]] = {}
-        for device in devices:
-            devices_by_safe_id.setdefault(self._safe_device_id(device.id), []).append(device)
-
-        pattern = os.path.join(
-            self._data_dir,
-            "episodes",
-            "*",
-            "recordings",
-            "*.mp4.part",
-        )
-        for working_path in sorted(glob.glob(pattern)):
-            filename = os.path.basename(working_path)
-            match = _RECORDING_PART.fullmatch(filename)
-            if not match:
-                logger.warning("Could not identify interrupted recording %s", filename)
+        """Discover unfinished HLS bundles and reconcile legacy MP4 partials."""
+        pattern = Path(self._data_dir, "episodes").glob(f"*/recordings/*/{CAPTURE_STATE_NAME}")
+        now = datetime.now(tz=timezone.utc)
+        for state_path in sorted(pattern):
+            try:
+                bundle = HLSRecordingBundle.load(state_path)
+            except (OSError, ValueError, KeyError):
+                logger.exception("Could not load interrupted HLS recording %s", state_path)
                 continue
-
-            episode_id = os.path.basename(os.path.dirname(os.path.dirname(working_path)))
-            candidates = devices_by_safe_id.get(match.group("device"), [])
-            if len(candidates) != 1:
-                logger.warning(
-                    "Could not resolve Device for interrupted recording %s",
-                    filename,
-                )
-                await self._repo.append_episode_journal(
-                    episode_id,
-                    "recording.incomplete",
-                    {
-                        "filename": filename,
-                        "reason": "device_identity_unresolved",
-                    },
+            state = bundle.state
+            existing = await self._repo.get_evidence(state.evidence_id)
+            if existing:
+                bundle.complete_publication()
+                continue
+            device = await self._repo.get_device(state.device_id)
+            episode = await self._repo.get_episode(state.episode_id)
+            if not device or not episode:
+                bundle.preserve_temporary_components()
+                bundle.refresh_manifest(
+                    state="incomplete", ended_at=now, reason="identity_unresolved"
                 )
                 continue
-
-            device = candidates[0]
-            started_at = datetime.strptime(
-                match.group("started"),
-                "%Y%m%d_%H%M%S_%f",
-            ).replace(tzinfo=timezone.utc)
-            ended_at = datetime.fromtimestamp(
-                os.path.getmtime(working_path),
-                tz=timezone.utc,
-            )
-            index = int(match.group("index"))
             rec = _EpisodeRecording(
-                episode_id=episode_id,
-                device_id=device.id,
-                area_id=device.area_id,
-                output_path=working_path.removesuffix(".part"),
-                working_path=working_path,
-                session_id=match.group("session"),
-                start_time=started_at,
-                segment_started_at={index: started_at},
-                stop_reason="startup_recovery",
+                episode_id=state.episode_id,
+                device_id=state.device_id,
+                area_id=state.area_id,
+                session_id=state.session_id,
+                bundle=bundle,
+                start_time=state.started_at,
+                continued=True,
             )
-            await self._finalize_segment(
-                rec,
-                index,
-                working_path,
-                started_at=started_at,
-                ended_at=ended_at,
+            resumable = episode.state in {EpisodeState.ACTIVE, EpisodeState.QUIESCENT} and (
+                episode.minimum_end_at is None or episode.minimum_end_at > now
             )
+            if resumable:
+                self._recoverable[self._rec_key(rec.episode_id, rec.device_id)] = rec
+                bundle.preserve_temporary_components()
+                bundle.refresh_manifest(state="interrupted", reason="startup_recovery")
+            else:
+                await self._finalize_bundle(rec, reason="startup_recovery")
+        await self._recover_legacy_mp4_partials()
 
     async def resume_active_episodes(self) -> None:
         now = datetime.now(tz=timezone.utc)
@@ -176,7 +215,6 @@ class RecordingEngine:
                     continue
                 for device in await self._target_resolver.resolve(event):
                     targets[device.id] = device
-
             for device in targets.values():
                 stream_url = self._stream_url(device)
                 if not stream_url:
@@ -194,54 +232,42 @@ class RecordingEngine:
                     {
                         "device_id": device.id,
                         "recording_session_id": recording.session_id,
+                        "evidence_id": recording.evidence_id,
                         "minimum_end_at": episode.minimum_end_at.isoformat(),
                     },
                 )
+        for key, recording in list(self._recoverable.items()):
+            self._recoverable.pop(key, None)
+            await self._finalize_bundle(
+                recording,
+                reason="active_target_not_reconstructed",
+            )
 
-    async def stop(self):
-        self._running = False
-        self._bus.unsubscribe("event.canonicalized", self._on_event)
-        self._bus.unsubscribe("episode.updated", self._on_episode_updated)
-        await self._stop_recordings(
-            list(self._recordings.values()),
-            reason="application_shutdown",
-        )
-        if self._active_tasks:
-            _, pending = await asyncio.wait(self._active_tasks, timeout=10)
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-
-    async def _on_event(self, msg: Message):
+    async def _on_event(self, msg: Message) -> None:
         result = msg.data.get("result")
         if not isinstance(result, CanonicalEventResult) or not result.created:
             return
         event = result.event
-        if event.event_state.value != "active":
+        if event.event_state != EventState.ACTIVE or not event.episode_id:
             return
-        episode_id = event.episode_id or ""
-        if not episode_id:
-            return
-
         for device in await self._target_resolver.resolve(event):
-            key = self._rec_key(episode_id, device.id)
+            key = self._rec_key(event.episode_id, device.id)
             if key in self._recordings:
                 continue
             try:
                 url = self._stream_url(device)
-                if not url:
+                if url:
+                    await self._start_recording(event.episode_id, device, url)
+                else:
                     logger.warning(
                         "Skipping recording for episode %s camera %s: no stream URL",
-                        episode_id[:8],
+                        event.episode_id[:8],
                         device.id,
                     )
-                    continue
-                await self._start_recording(episode_id, device, url)
             except Exception:
                 logger.exception(
                     "Could not start recording for episode %s camera %s",
-                    episode_id[:8],
+                    event.episode_id[:8],
                     device.id,
                 )
 
@@ -252,83 +278,77 @@ class RecordingEngine:
         video = device.get_config("video")
         return video.build_url(device.ip_address, device.username, device.password) if video else ""
 
-    async def _start_recording(self, episode_id: str, device: Device, rtsp_url: str):
+    async def _start_recording(self, episode_id: str, device: Device, rtsp_url: str) -> None:
         key = self._rec_key(episode_id, device.id)
         if key in self._recordings:
             return
-
-        started_at = datetime.now(tz=timezone.utc)
-        ts = started_at.strftime("%Y%m%d_%H%M%S_%f")
-        safe_device_id = self._safe_device_id(device.id)
-        session_id = uuid.uuid4().hex[:12]
-        filename = f"rec_{safe_device_id}_{ts}_{session_id}_%06d.mp4"
-        output = os.path.join(self._data_dir, "episodes", episode_id, "recordings", filename)
-        working = f"{output}.part"
-
-        rec = _EpisodeRecording(
-            episode_id=episode_id,
-            device_id=device.id,
-            area_id=device.area_id,
-            output_path=output,
-            working_path=working,
-            session_id=session_id,
-            start_time=started_at,
-            segment_started_at={0: started_at},
-        )
+        rec = self._recoverable.pop(key, None)
+        if rec is None:
+            started_at = datetime.now(tz=timezone.utc)
+            evidence_id = str(uuid.uuid4())
+            session_id = uuid.uuid4().hex[:12]
+            root = Path(self._data_dir, "episodes", episode_id, "recordings", evidence_id)
+            bundle = HLSRecordingBundle.create(
+                root,
+                HLSCaptureState(
+                    evidence_id=evidence_id,
+                    episode_id=episode_id,
+                    device_id=device.id,
+                    area_id=device.area_id,
+                    session_id=session_id,
+                    started_at=started_at,
+                ),
+            )
+            rec = _EpisodeRecording(
+                episode_id=episode_id,
+                device_id=device.id,
+                area_id=device.area_id,
+                session_id=session_id,
+                bundle=bundle,
+                start_time=started_at,
+            )
+        rec.rtsp_url = rtsp_url
         self._recordings[key] = rec
-
         rec.task = asyncio.create_task(self._record_episode(rec, rtsp_url))
         self._active_tasks.add(rec.task)
         rec.task.add_done_callback(self._active_tasks.discard)
-
         logger.info(
-            "Started recording %s for episode %s camera %s",
-            filename.replace("%06d", "*"),
+            "Started HLS recording %s for episode %s camera %s",
+            rec.evidence_id[:8],
             episode_id[:8],
             device.id,
         )
 
-    async def _on_episode_updated(self, msg: Message):
+    async def _on_episode_updated(self, msg: Message) -> None:
+        if msg.data.get("state") != "closed":
+            return
         episode_id = msg.data.get("episode_id", "")
-        state = msg.data.get("state", "")
-        if state == "closed":
-            recordings = [
-                recording
-                for recording in self._recordings.values()
-                if recording.episode_id == episode_id
-            ]
-            await asyncio.gather(*(self._stop_recording(recording) for recording in recordings))
+        recordings = [
+            recording
+            for recording in self._recordings.values()
+            if recording.episode_id == episode_id
+        ]
+        await asyncio.gather(*(self._stop_recording(recording) for recording in recordings))
 
-    async def _stop_recording(
-        self,
-        rec: _EpisodeRecording,
-        *,
-        reason: str | None = None,
-    ) -> None:
+    async def _stop_recording(self, rec: _EpisodeRecording, *, reason: str | None = None) -> None:
         await self._stop_recordings([rec], reason=reason)
 
     async def _stop_recordings(
-        self,
-        recordings: list[_EpisodeRecording],
-        *,
-        reason: str | None = None,
+        self, recordings: list[_EpisodeRecording], *, reason: str | None = None
     ) -> None:
         if not recordings:
             return
-
         for rec in recordings:
             self._recordings.pop(self._rec_key(rec.episode_id, rec.device_id), None)
             rec.stop_reason = reason
             self._signal_process(rec)
-
         if reason:
             await asyncio.gather(
                 *(self._journal_interruption(rec, reason) for rec in recordings),
                 return_exceptions=True,
             )
         await asyncio.gather(
-            *(self._finish_stop(rec) for rec in recordings),
-            return_exceptions=True,
+            *(self._finish_stop(rec) for rec in recordings), return_exceptions=True
         )
 
     @staticmethod
@@ -342,7 +362,19 @@ class RecordingEngine:
     async def _finish_stop(self, rec: _EpisodeRecording) -> None:
         await self._await_process_stop(rec)
         if rec.task and rec.task is not asyncio.current_task():
-            await asyncio.gather(rec.task, return_exceptions=True)
+            results = await asyncio.gather(rec.task, return_exceptions=True)
+            if (
+                results
+                and isinstance(results[0], BaseException)
+                and not isinstance(results[0], asyncio.CancelledError)
+            ):
+                error = results[0]
+                logger.error(
+                    "Recording finalization failed for episode %s camera %s",
+                    rec.episode_id[:8],
+                    rec.device_id,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
 
     async def _terminate_process(self, rec: _EpisodeRecording) -> None:
         self._signal_process(rec)
@@ -366,6 +398,7 @@ class RecordingEngine:
                 {
                     "device_id": rec.device_id,
                     "recording_session_id": rec.session_id,
+                    "evidence_id": rec.evidence_id,
                     "reason": reason,
                 },
             )
@@ -376,23 +409,34 @@ class RecordingEngine:
                 rec.device_id,
             )
 
-    async def _record_episode(self, rec: _EpisodeRecording, rtsp_url: str, _retries: int = 0):
+    async def _record_episode(
+        self, rec: _EpisodeRecording, rtsp_url: str, _retries: int = 0
+    ) -> None:
         key = self._rec_key(rec.episode_id, rec.device_id)
-        os.makedirs(os.path.dirname(rec.output_path), exist_ok=True)
-        segments_before = rec.next_segment_index
-        wait_task = None
+        if rec.stop_reason == "application_shutdown" or not self._running:
+            rec.bundle.refresh_manifest(state="interrupted", reason="application_shutdown")
+            return
+        if self._recordings.get(key) is not rec:
+            await self._finalize_bundle(rec)
+            return
+        segments_before = rec.bundle.next_segment_index()
+        flags = "independent_segments+program_date_time+temp_file+append_list"
+        if rec.continued or _retries:
+            flags += "+discont_start"
         returncode = -1
-
+        wait_task: asyncio.Task | None = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
-                "-n",
+                "-y",
                 "-rtsp_transport",
                 "tcp",
                 "-i",
                 rtsp_url,
                 "-map",
-                "0",
+                "0:v:0",
+                "-map",
+                "0:a?",
                 "-c:v",
                 "copy",
                 "-c:a",
@@ -400,34 +444,47 @@ class RecordingEngine:
                 "-b:a",
                 "128k",
                 "-f",
-                "segment",
-                "-segment_time",
-                str(self._segment_seconds),
-                "-reset_timestamps",
-                "1",
-                "-segment_format",
-                "mp4",
-                "-segment_start_number",
-                str(rec.next_segment_index),
-                rec.working_path,
+                "hls",
+                "-hls_time",
+                str(self._fragment_seconds),
+                "-hls_list_size",
+                "0",
+                "-hls_playlist_type",
+                "event",
+                "-hls_segment_type",
+                "fmp4",
+                "-hls_fmp4_init_filename",
+                "init.mp4",
+                "-hls_segment_filename",
+                "segments/segment-%06d.m4s",
+                "-hls_base_url",
+                "segments/",
+                "-start_number",
+                str(rec.bundle.next_segment_index()),
+                "-hls_flags",
+                flags,
+                "index.m3u8",
+                cwd=str(rec.bundle.root),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
             rec.proc = proc
             wait_task = asyncio.create_task(proc.wait())
             while not wait_task.done():
-                done, _ = await asyncio.wait({wait_task}, timeout=1)
-                await self._finalize_ready_segments(rec, include_latest=bool(done))
+                await asyncio.wait({wait_task}, timeout=1)
+                await asyncio.to_thread(rec.bundle.refresh_manifest, state="recording")
             returncode = await wait_task
         except asyncio.CancelledError:
             await self._terminate_process(rec)
             if wait_task:
                 await asyncio.gather(wait_task, return_exceptions=True)
-            await self._finalize_ready_segments(rec, include_latest=True)
-            self._recordings.pop(key, None)
-            await self._preserve_working_segments(rec, reason="recording_task_cancelled")
+            rec.bundle.preserve_temporary_components()
+            rec.bundle.refresh_manifest(state="interrupted", reason="recording_task_cancelled")
             raise
         except Exception:
+            await self._terminate_process(rec)
+            if wait_task:
+                await asyncio.gather(wait_task, return_exceptions=True)
             logger.exception(
                 "Recording process failed for episode %s camera %s",
                 rec.episode_id[:8],
@@ -436,26 +493,31 @@ class RecordingEngine:
         finally:
             rec.proc = None
 
-        await self._finalize_ready_segments(rec, include_latest=True)
-
+        if rec.stop_reason == "application_shutdown" or not self._running:
+            rec.bundle.preserve_temporary_components()
+            rec.bundle.refresh_manifest(state="interrupted", reason="application_shutdown")
+            return
         if self._recordings.get(key) is not rec:
-            return
-        episode = await self._repo.get_episode(rec.episode_id)
-        if not self._running or not episode or episode.state == EpisodeState.CLOSED:
-            self._recordings.pop(key, None)
+            await self._finalize_bundle(rec)
             return
 
-        retry = 0 if rec.next_segment_index > segments_before else _retries + 1
+        episode = await self._repo.get_episode(rec.episode_id)
+        if not episode or episode.state == EpisodeState.CLOSED:
+            self._recordings.pop(key, None)
+            await self._finalize_bundle(rec)
+            return
+
+        segments_after = rec.bundle.next_segment_index()
+        retry = 0 if segments_after > segments_before else _retries + 1
         if retry > 3:
             self._recordings.pop(key, None)
-            await self._preserve_working_segments(rec, reason="retry_limit_exceeded")
+            await self._finalize_bundle(rec, incomplete=True, reason="retry_limit_exceeded")
             logger.error(
                 "Recording failed for episode %s camera %s after 3 retries",
                 rec.episode_id[:8],
                 rec.device_id,
             )
             return
-
         logger.warning(
             "Recording process ended for episode %s camera %s "
             "(ffmpeg exit %s), reconnecting (%d/3)",
@@ -470,176 +532,182 @@ class RecordingEngine:
         episode = await self._repo.get_episode(rec.episode_id)
         if not episode or episode.state == EpisodeState.CLOSED:
             self._recordings.pop(key, None)
+            await self._finalize_bundle(rec, incomplete=True, reason="episode_closed")
             return
+        rec.continued = True
         await self._record_episode(rec, rtsp_url, retry)
 
-    def _segment_entries(self, rec: _EpisodeRecording) -> list[tuple[int, str]]:
-        entries = []
-        pattern = rec.working_path.replace("%06d", "*")
-        for path in sorted(glob.glob(pattern)):
-            index_text = path.removesuffix(".mp4.part").rsplit("_", 1)[-1]
-            if index_text.isdigit():
-                entries.append((int(index_text), path))
-        return entries
-
-    async def _finalize_ready_segments(
-        self, rec: _EpisodeRecording, *, include_latest: bool
-    ) -> None:
-        entries = self._segment_entries(rec)
-        if not entries:
-            return
-
-        observed_at = datetime.now(tz=timezone.utc)
-        for index, _ in entries:
-            if index == 0 and rec.start_time:
-                rec.segment_started_at.setdefault(index, rec.start_time)
-            else:
-                rec.segment_started_at.setdefault(index, observed_at)
-
-        ready = entries if include_latest else entries[:-1]
-        for index, working_path in ready:
-            started_at = rec.segment_started_at.get(index, observed_at)
-            ended_at = rec.segment_started_at.get(index + 1, observed_at)
-            await self._finalize_segment(
-                rec,
-                index,
-                working_path,
-                started_at=started_at,
-                ended_at=ended_at,
-            )
-            rec.next_segment_index = max(rec.next_segment_index, index + 1)
-
-    async def _finalize_segment(
+    async def _finalize_bundle(
         self,
         rec: _EpisodeRecording,
-        index: int,
-        working_path: str,
         *,
-        started_at: datetime,
-        ended_at: datetime,
+        incomplete: bool = False,
+        reason: str | None = None,
     ) -> None:
-        if not os.path.exists(working_path):
+        if rec.published:
             return
-        if os.path.getsize(working_path) < 4096 or not await self._has_video_stream(working_path):
-            logger.warning(
-                "Recording segment invalid for episode %s camera %s, preserving as incomplete",
-                rec.episode_id[:8],
-                rec.device_id,
-            )
-            await self._preserve_incomplete_segment(
-                rec,
-                index,
-                working_path,
-                reason=rec.stop_reason or "recording_process_failed",
-                started_at=started_at,
-                ended_at=ended_at,
-            )
-            return
-
-        output_path = working_path.removesuffix(".part")
-        os.replace(working_path, output_path)
-        byte_size = os.path.getsize(output_path)
-        duration = max(0, int((ended_at - started_at).total_seconds()))
+        ended_at = datetime.now(tz=timezone.utc)
+        manifest = rec.bundle.prepare_finalize(ended_at=ended_at, reason=reason)
+        playable = manifest["fragment_count"] > 0 and rec.bundle.playlist_path.exists()
+        evidence_type = "recording" if playable and not incomplete else "incomplete_recording"
+        file_path = (
+            str(rec.bundle.playlist_path)
+            if rec.bundle.playlist_path.exists()
+            else str(rec.bundle.component_manifest_path)
+        )
+        duration = max(0, int((ended_at - rec.start_time).total_seconds()))
+        playlist_sha = next(
+            (item["sha256"] for item in manifest["components"] if item["path"] == "index.m3u8"),
+            None,
+        )
         evidence = Evidence(
+            id=rec.evidence_id,
             device_id=rec.device_id,
             area_id=rec.area_id,
-            timestamp=started_at,
-            evidence_type="recording",
-            file_path=output_path,
-            mime_type="video/mp4",
+            timestamp=rec.start_time,
+            evidence_type=evidence_type,
+            file_path=file_path,
+            mime_type=HLS_MIME_TYPE if playable else "application/json",
+            original_filename="index.m3u8" if playable else "manifest.json",
             episode_id=rec.episode_id,
             metadata={
                 "origin": "recording",
+                "format": "hls-fmp4",
                 "recording_session_id": rec.session_id,
-                "segment_index": index,
-                "segment_seconds": self._segment_seconds,
-                "started_at": started_at.isoformat(),
+                "started_at": rec.start_time.isoformat(),
                 "ended_at": ended_at.isoformat(),
                 "duration_seconds": duration,
+                "fragment_seconds": self._fragment_seconds,
+                "fragment_count": manifest["fragment_count"],
+                "component_count": manifest["component_count"],
+                "bundle_bytes": manifest["total_bytes"],
+                "component_manifest": "manifest.json",
+                "component_manifest_sha256": rec.bundle.component_manifest_sha256(),
+                "integrity_scope": "recording_bundle_manifest",
+                "playlist_sha256": playlist_sha,
+                **(
+                    {"status": "incomplete", "reason": reason}
+                    if evidence_type != "recording"
+                    else {}
+                ),
             },
         )
         await self._bus.publish(
             Message(type="evidence.received", data={"evidence": asdict(evidence)})
         )
-        if rec.stop_reason:
-            await self._repo.append_episode_journal(
-                rec.episode_id,
-                "recording.recovered",
-                {
-                    "device_id": rec.device_id,
-                    "recording_session_id": rec.session_id,
-                    "segment_index": index,
-                    "recovery": "graceful_finalize",
-                },
+        if not await self._repo.get_evidence(rec.evidence_id):
+            raise RuntimeError(
+                f"Recording Evidence {rec.evidence_id} was not persisted; "
+                "the recovery marker has been retained"
             )
-        logger.info(
-            "Recording segment %d complete for episode %s camera %s: %s (%.1f KB)",
-            index,
-            rec.episode_id[:8],
-            rec.device_id,
-            os.path.basename(output_path),
-            byte_size / 1024,
-        )
-
-    async def _preserve_working_segments(
-        self,
-        rec: _EpisodeRecording,
-        *,
-        reason: str,
-    ) -> None:
-        observed_at = datetime.now(tz=timezone.utc)
-        for index, path in self._segment_entries(rec):
-            await self._preserve_incomplete_segment(
-                rec,
-                index,
-                path,
-                reason=reason,
-                started_at=rec.segment_started_at.get(index, rec.start_time or observed_at),
-                ended_at=observed_at,
-            )
-
-    async def _preserve_incomplete_segment(
-        self,
-        rec: _EpisodeRecording,
-        index: int,
-        working_path: str,
-        *,
-        reason: str,
-        started_at: datetime,
-        ended_at: datetime,
-    ) -> None:
-        if not os.path.exists(working_path):
-            return
-        evidence = Evidence(
-            device_id=rec.device_id,
-            area_id=rec.area_id,
-            timestamp=started_at,
-            evidence_type="incomplete_recording",
-            file_path=working_path,
-            mime_type="application/octet-stream",
-            original_filename=os.path.basename(working_path),
-            episode_id=rec.episode_id,
-            metadata={
-                "origin": "recording",
-                "status": "incomplete",
-                "reason": reason,
-                "recording_session_id": rec.session_id,
-                "segment_index": index,
-                "started_at": started_at.isoformat(),
-                "ended_at": ended_at.isoformat(),
-            },
-        )
-        await self._bus.publish(
-            Message(type="evidence.received", data={"evidence": asdict(evidence)})
-        )
+        rec.published = True
+        rec.bundle.complete_publication()
         await self._repo.append_episode_journal(
             rec.episode_id,
-            "recording.incomplete",
+            ("recording.completed" if evidence_type == "recording" else "recording.incomplete"),
             {
                 "device_id": rec.device_id,
                 "recording_session_id": rec.session_id,
+                "evidence_id": rec.evidence_id,
+                "fragment_count": manifest["fragment_count"],
+                **({"reason": reason} if reason else {}),
+            },
+        )
+        logger.info(
+            "Recording Evidence %s complete for episode %s camera %s: %d fragments (%.1f MiB)",
+            rec.evidence_id[:8],
+            rec.episode_id[:8],
+            rec.device_id,
+            manifest["fragment_count"],
+            manifest["total_bytes"] / (1024 * 1024),
+        )
+
+    async def _recover_legacy_mp4_partials(self) -> None:
+        devices = await self._repo.list_devices(include_disabled=True)
+        devices_by_safe_id: dict[str, list[Device]] = {}
+        for device in devices:
+            devices_by_safe_id.setdefault(self._safe_device_id(device.id), []).append(device)
+        pattern = os.path.join(self._data_dir, "episodes", "*", "recordings", "*.mp4.part")
+        for working_path in sorted(glob.glob(pattern)):
+            match = _RECORDING_PART.fullmatch(os.path.basename(working_path))
+            episode_id = os.path.basename(os.path.dirname(os.path.dirname(working_path)))
+            if not match:
+                logger.warning("Could not identify interrupted recording %s", working_path)
+                continue
+            candidates = devices_by_safe_id.get(match.group("device"), [])
+            if len(candidates) != 1:
+                await self._repo.append_episode_journal(
+                    episode_id,
+                    "recording.incomplete",
+                    {
+                        "filename": os.path.basename(working_path),
+                        "reason": "device_identity_unresolved",
+                    },
+                )
+                continue
+            device = candidates[0]
+            started_at = datetime.strptime(match.group("started"), "%Y%m%d_%H%M%S_%f").replace(
+                tzinfo=timezone.utc
+            )
+            ended_at = datetime.fromtimestamp(os.path.getmtime(working_path), tz=timezone.utc)
+            await self._finalize_legacy_partial(
+                episode_id,
+                device,
+                working_path,
+                match.group("session"),
+                int(match.group("index")),
+                started_at,
+                ended_at,
+            )
+
+    async def _finalize_legacy_partial(
+        self,
+        episode_id: str,
+        device: Device,
+        working_path: str,
+        session_id: str,
+        index: int,
+        started_at: datetime,
+        ended_at: datetime,
+    ) -> None:
+        valid = os.path.getsize(working_path) >= 4096 and await self._has_video_stream(working_path)
+        output_path = working_path.removesuffix(".part") if valid else working_path
+        if valid:
+            os.replace(working_path, output_path)
+        evidence = Evidence(
+            device_id=device.id,
+            area_id=device.area_id,
+            timestamp=started_at,
+            evidence_type="recording" if valid else "incomplete_recording",
+            file_path=output_path,
+            mime_type="video/mp4" if valid else "application/octet-stream",
+            episode_id=episode_id,
+            metadata={
+                "origin": "recording",
+                "format": "mp4",
+                "status": "recovered" if valid else "incomplete",
+                "reason": "startup_recovery",
+                "recording_session_id": session_id,
                 "segment_index": index,
-                "reason": reason,
+                "started_at": started_at.isoformat(),
+                "ended_at": ended_at.isoformat(),
+                "duration_seconds": max(0, int((ended_at - started_at).total_seconds())),
+            },
+        )
+        await self._bus.publish(
+            Message(type="evidence.received", data={"evidence": asdict(evidence)})
+        )
+        if not await self._repo.get_evidence(evidence.id):
+            if valid and os.path.exists(output_path):
+                os.replace(output_path, working_path)
+            raise RuntimeError(f"Recovered recording Evidence {evidence.id} was not persisted")
+        await self._repo.append_episode_journal(
+            episode_id,
+            "recording.recovered" if valid else "recording.incomplete",
+            {
+                "device_id": device.id,
+                "recording_session_id": session_id,
+                "segment_index": index,
             },
         )
 
@@ -660,9 +728,7 @@ class RecordingEngine:
                 stderr=subprocess.DEVNULL,
             )
         except OSError:
-            logger.warning("Could not validate recording %s", os.path.basename(path))
             return False
-
         try:
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             return proc.returncode == 0 and stdout.strip() == b"video"
@@ -670,21 +736,13 @@ class RecordingEngine:
             if proc.returncode is None:
                 proc.kill()
                 await proc.wait()
-            logger.warning("Could not validate recording %s", os.path.basename(path))
             return False
 
-    @staticmethod
-    def _remove_file(path: str):
-        try:
-            os.remove(path)
-        except FileNotFoundError:
-            pass
-
     def status(self) -> dict:
-        cameras = len(set(k[1] for k in self._recordings))
         return {
             "running": self._running,
             "active_recordings": len(self._recordings),
-            "cameras": cameras,
-            "segment_seconds": self._segment_seconds,
+            "cameras": len({key[1] for key in self._recordings}),
+            "format": "hls-fmp4",
+            "fragment_seconds": self._fragment_seconds,
         }

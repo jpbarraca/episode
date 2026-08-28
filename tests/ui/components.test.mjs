@@ -19,6 +19,7 @@ const componentsUrl = moduleUrl(
 const {
   detailMetric,
   episodeStateBadge,
+  episodeTriggerBadge,
   eventBadge,
   pageControls,
   pageHeader,
@@ -56,6 +57,13 @@ test("Episode state badges only surface meaningful list state", () => {
   assert.equal(episodeStateBadge("active"), stateBadge("Active"));
   assert.equal(episodeStateBadge("quiescent"), stateBadge("Active"));
   assert.equal(episodeStateBadge("archived"), stateBadge("archived"));
+});
+
+test("Episode trigger badges include door access Events", () => {
+  assert.equal(
+    episodeTriggerBadge("access"),
+    '<span class="badge badge-access episode-trigger" title="Triggered by a door access Event">Access</span>',
+  );
 });
 
 test("source badges have a deterministic presentation order", () => {

@@ -19,6 +19,16 @@ class FakeRecordings:
     def active_device_ids(self, episode_id: str) -> tuple[str, ...]:
         return self.assignments.get(episode_id, ())
 
+    def active_recordings(self, episode_id: str):
+        return tuple(
+            {
+                "device_id": device_id,
+                "evidence_id": f"evidence-{device_id}",
+                "ready": True,
+            }
+            for device_id in self.active_device_ids(episode_id)
+        )
+
 
 class FakeSnapshots:
     def __init__(self, available: set[str]) -> None:
@@ -92,6 +102,7 @@ async def test_active_episode_current_view_api_never_exposes_media_credentials(t
                     "mode": "snapshot",
                     "refresh_interval_seconds": 3,
                     "image_url": "/api/v1/episodes/episode-a/current-views/camera-a",
+                    "stream_url": None,
                     "summary": "Refreshing while this Device records",
                 },
                 {
@@ -100,6 +111,7 @@ async def test_active_episode_current_view_api_never_exposes_media_credentials(t
                     "mode": "unavailable",
                     "refresh_interval_seconds": 3,
                     "image_url": None,
+                    "stream_url": None,
                     "summary": "Recording continues without a preview provider",
                 },
             ]
@@ -109,5 +121,37 @@ async def test_active_episode_current_view_api_never_exposes_media_credentials(t
             assert image.status_code == 200
             assert image.content == b"preview:camera-a"
             assert image.headers["cache-control"] == "no-store"
+    finally:
+        await repository.close()
+
+
+@pytest.mark.asyncio
+async def test_ready_recording_stream_replaces_snapshot_current_view(tmp_path):
+    repository = Repository(EpisodeConfig(data_dir=str(tmp_path)))
+    await repository.initialize()
+    await repository.upsert_area(Area(id="front-door", name="Front door"))
+    await repository.upsert_device(Device(id="camera-a", name="Entry camera", area_id="front-door"))
+    await repository.create_episode(
+        Episode(id="episode-a", primary_area_id="front-door", state=EpisodeState.ACTIVE)
+    )
+    recordings = FakeRecordings({"episode-a": ("camera-a",)})
+    previews = CurrentViewService(FakeSnapshots({"camera-a"}), recordings)
+    app = create_api(
+        repository,
+        str(tmp_path),
+        current_views=previews,
+        recorder=recordings,
+    )
+    transport = httpx.ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/v1/episodes/episode-a/current-views")
+        assert response.status_code == 200
+        assert response.json()[0]["mode"] == "hls"
+        assert response.json()[0]["image_url"] is None
+        assert response.json()[0]["stream_url"] == (
+            "/api/v1/recordings/evidence-camera-a/index.m3u8"
+        )
+        assert "camera/" not in response.text
     finally:
         await repository.close()

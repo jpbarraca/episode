@@ -25,6 +25,7 @@ export function eventBadge(type) {
 export function episodeTriggerBadge(triggerType) {
   const triggers = {
     doorbell: ["Doorbell", "Triggered by a Doorbell Event"],
+    access: ["Access", "Triggered by a door access Event"],
     motion: ["Motion", "Triggered by a motion Event"],
     manual: ["Manual", "Triggered by a manual Event"],
   };

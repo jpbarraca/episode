@@ -9,7 +9,7 @@ import {
   pageHeader,
   sectionHeading,
   stateBadge,
-} from "./components.js?v=5";
+} from "./components.js?v=6";
 import { closeDeliveryViewer, openDeliveryViewer } from "./delivery-viewer.js?v=1";
 import { escHtml } from "./dom.js";
 import {
@@ -17,7 +17,12 @@ import {
   deactivateCurrentViews,
   renderCurrentViews,
 } from "./current-views.js?v=2";
-import { episodeRailTime, groupEpisodesByTime } from "./episode-list.js?v=2";
+import {
+  episodeDisplayEnd,
+  episodeRailTime,
+  groupEpisodesByTime,
+} from "./episode-list.js?v=3";
+import { attachMediaSource, evidenceMediaUrl, isHlsEvidence } from "./media-player.js?v=1";
 import {
   originBadge,
   renderEvidenceArchive,
@@ -176,12 +181,12 @@ export async function episodes(page = 1) {
                       <div class="episode-history-summary">
                         <span title="Activity"><svg><use href="icons.svg?v=2#activity"></use></svg>${plural(item.event_count, "event")}</span>
                         <span title="Evidence"><svg><use href="icons.svg?v=2#evidence"></use></svg>${plural(item.evidence_count, "evidence")}</span>
-                        <span title="Duration"><svg><use href="icons.svg?v=2#clock"></use></svg>${fmtDuration(item.start_time, item.end_time || item.last_event_time) || "Ongoing"}</span>
+                        <span title="Duration"><svg><use href="icons.svg?v=2#clock"></use></svg>${fmtDuration(item.start_time, episodeDisplayEnd(item)) || "Ongoing"}</span>
                       </div>
                       <div class="episode-history-range">
                         <svg><use href="icons.svg?v=2#clock"></use></svg>
                         <span>${fmtShort(item.start_time)}
-                          ${item.last_event_time ? `→ ${fmtShort(item.last_event_time)}` : ""}</span>
+                          ${episodeDisplayEnd(item) ? `→ ${fmtShort(episodeDisplayEnd(item))}` : ""}</span>
                       </div>
                     </div>
                   </a>
@@ -597,7 +602,7 @@ export async function evidenceDetail(id) {
   showLoading();
   try {
     const item = await api("/evidence/" + id);
-    const isVideo = item.mime_type?.startsWith("video/");
+    const isVideo = item.mime_type?.startsWith("video/") || isHlsEvidence(item);
     const isImage = item.mime_type?.startsWith("image/");
     const isText = item.mime_type?.startsWith("text/") || item.mime_type === "application/xml";
     const expired = item.availability === "expired";
@@ -646,7 +651,7 @@ export async function evidenceDetail(id) {
     if (expired) {
       media = `<div class="evidence-detail-file"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
     } else if (isVideo) {
-      media = `<video src="${API}/evidence/${item.id}/file" controls preload="metadata"></video>`;
+      media = `<video controls preload="metadata"></video>`;
     } else if (isImage) {
       media = `<div class="review-media-image">
         <img src="${API}/evidence/${item.id}/file" alt="Preserved ${escHtml(titleCase(item.evidence_type))}">
@@ -724,10 +729,16 @@ export async function evidenceDetail(id) {
         )}
         <div class="review-media-frame">${media}</div>
         <footer class="review-media-footer">
-          <span>${expired ? `Expired ${fmt(item.expired_at)}` : item.sha256 ? "SHA-256 fingerprint recorded" : "No integrity fingerprint recorded"}</span>
+          <span>${expired
+            ? `Expired ${fmt(item.expired_at)}`
+            : item.sha256
+            ? isHlsEvidence(item) ? "Bundle manifest fingerprint recorded" : "SHA-256 fingerprint recorded"
+            : "No integrity fingerprint recorded"}</span>
           ${expired ? "" : `<nav>
             ${peerIndex >= 0 && (isImage || isVideo) ? '<button id="evidence-open-viewer" type="button">Open viewer</button>' : ""}
-            <a href="${API}/evidence/${item.id}/file" download>Download file</a>
+            ${isHlsEvidence(item)
+              ? `<a href="${API}/recordings/${item.id}/manifest.json" download>Download component manifest</a>`
+              : `<a href="${API}/evidence/${item.id}/file" download>Download file</a>`}
           </nav>`}
         </footer>
       </section>
@@ -738,9 +749,13 @@ export async function evidenceDetail(id) {
           <div><dt>Original filename</dt><dd>${escHtml(item.original_filename || "Not reported")}</dd></div>
           <div><dt>Media type</dt><dd>${escHtml(item.mime_type || "Unknown")}</dd></div>
           <div><dt>File size</dt><dd>${fmtBytes(item.byte_size)}</dd></div>
-          <div class="integrity-fact"><dt>SHA-256 fingerprint</dt><dd>${item.sha256 ? `<code>${escHtml(item.sha256)}</code><small>Use this fingerprint to verify that the stored bytes have not changed.</small>` : "Not indexed"}</dd></div>
+          <div class="integrity-fact"><dt>${isHlsEvidence(item) ? "Bundle manifest SHA-256" : "SHA-256 fingerprint"}</dt><dd>${item.sha256 ? `<code>${escHtml(item.sha256)}</code><small>${isHlsEvidence(item) ? "Verifies the component inventory that fingerprints every recording fragment." : "Use this fingerprint to verify that the stored bytes have not changed."}</small>` : "Not indexed"}</dd></div>
         </dl>
       </section>`);
+    if (!expired && isVideo) {
+      const video = document.querySelector(".evidence-detail-media video");
+      if (video) attachMediaSource(video, evidenceMediaUrl(item));
+    }
     document.getElementById("evidence-open-viewer")?.addEventListener("click", () => {
       showCarousel(peerMedia, peerIndex);
     });

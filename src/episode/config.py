@@ -42,11 +42,11 @@ class SnapshotActionConfig:
 
 @dataclass
 class RecordingActionConfig:
-    segment_seconds: int = 600
+    fragment_seconds: int = 4
 
     def __post_init__(self):
-        if self.segment_seconds <= 0:
-            raise ValueError("recording segment_seconds must be greater than zero")
+        if not 1 <= self.fragment_seconds <= 30:
+            raise ValueError("recording fragment_seconds must be between 1 and 30")
 
 
 @dataclass

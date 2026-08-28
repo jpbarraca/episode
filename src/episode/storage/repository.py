@@ -494,8 +494,14 @@ class Repository:
             )
             if artifact:
                 evidence.artifact_id = artifact.id
-                evidence.byte_size = artifact.byte_size
-                evidence.sha256 = artifact.sha256
+                if evidence.metadata.get("format") == "hls-fmp4":
+                    evidence.byte_size = evidence.metadata.get("bundle_bytes", artifact.byte_size)
+                    evidence.sha256 = evidence.metadata.get(
+                        "component_manifest_sha256", artifact.sha256
+                    )
+                else:
+                    evidence.byte_size = artifact.byte_size
+                    evidence.sha256 = artifact.sha256
 
         await self._conn.execute(
             """INSERT INTO evidence (
@@ -631,7 +637,7 @@ class Repository:
             f"{_EVIDENCE_SELECT} "
             "WHERE x.evidence_id IS NULL AND e.timestamp < ? "
             "AND (e.mime_type LIKE 'image/%' OR e.mime_type LIKE 'video/%' "
-            "OR e.evidence_type = 'incomplete_recording') "
+            "OR e.evidence_type IN ('recording', 'incomplete_recording')) "
             "ORDER BY e.timestamp ASC",
             (_utc_iso(cutoff),),
         )
@@ -941,13 +947,25 @@ class Repository:
 
         new_path = evidence.file_path
         if evidence.file_path:
-            subdir = {
-                "snapshot": "snapshots",
-                "recording": "recordings",
-            }.get(evidence.evidence_type, "other")
-            new_path = await async_move_to_episode(
-                self._data_dir, episode_id, evidence.file_path, subdir
+            subdir = (
+                "recordings"
+                if evidence.metadata.get("format") == "hls-fmp4"
+                else {
+                    "snapshot": "snapshots",
+                    "recording": "recordings",
+                }.get(evidence.evidence_type, "other")
             )
+            expected_root = os.path.abspath(
+                os.path.join(self._data_dir, "episodes", episode_id, subdir)
+            )
+            existing_path = os.path.abspath(evidence.file_path)
+            is_managed_bundle = evidence.metadata.get("format") == "hls-fmp4" and (
+                existing_path == expected_root or existing_path.startswith(expected_root + os.sep)
+            )
+            if not is_managed_bundle:
+                new_path = await async_move_to_episode(
+                    self._data_dir, episode_id, evidence.file_path, subdir
+                )
             if (
                 evidence.artifact_id
                 and self._provenance is not None
