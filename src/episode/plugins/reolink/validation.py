@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from typing import Any
 
@@ -11,35 +10,6 @@ from episode.domain.models import Device
 from episode.plugins.reolink.client import BaichuanApiClient, ReolinkError, ReolinkLoginError
 
 logger = logging.getLogger(__name__)
-
-
-def _ability_supports(ability: dict[str, Any], token: str) -> bool:
-    """Return True if an ability-info dict indicates support for ``token``.
-
-    The parsed ability XML is a nested dict; capability presence is detected
-    by scanning the serialized JSON for the token. This is tolerant of
-    firmware-specific XML layouts.
-    """
-    try:
-        blob = json.dumps(ability, sort_keys=True)
-    except (TypeError, ValueError):
-        return False
-    return token in blob
-
-
-def _detect_events(ability: dict[str, Any] | None) -> bool:
-    """Detect push-event support from the AbilityInfo response.
-
-    Reolink push events (cmdId=33) rely on the alarm / IO / network
-    subsystems, so we look for those tokens in the ability payload.
-    """
-    if not ability:
-        return False
-    return (
-        _ability_supports(ability, "alarm")
-        or _ability_supports(ability, "IO")
-        or _ability_supports(ability, "network")
-    )
 
 
 async def validate_device(
@@ -107,13 +77,15 @@ async def validate_device(
             details["streams"] = stream_count
             details["stream_supported"] = True
 
-        # Events (cmdId=151 AbilityInfo)
-        ability = None
+        # Events (cmdId=31 subscription). Probe the operation itself instead
+        # of inferring support from loosely structured ability names.
+        events_supported = False
         try:
-            ability = await asyncio.wait_for(client.get_ability_info(), timeout=probe_timeout)
+            events_supported = await asyncio.wait_for(
+                client.subscribe_events(), timeout=probe_timeout
+            )
         except Exception as exc:
-            logger.debug("Reolink validation: ability probe failed: %s", exc)
-        events_supported = _detect_events(ability)
+            logger.debug("Reolink validation: event subscription probe failed: %s", exc)
         if events_supported:
             capabilities.append("events")
         details["events_supported"] = events_supported
@@ -143,7 +115,6 @@ async def validate_device(
             info.channel_count,
             capabilities,
         )
-        await client.close()
         return _result(
             "supported",
             summary,
@@ -217,6 +188,11 @@ async def validate_device(
             f"Reolink validation failed ({exc.__class__.__name__})",
             checked_at,
         )
+    finally:
+        try:
+            await client.close()
+        except Exception:
+            logger.debug("Reolink validation client cleanup failed", exc_info=True)
 
 
 def _result(

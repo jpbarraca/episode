@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
 # A plugin-native snapshot fetcher: returns (jpeg_bytes, content_type) or raises.
-SnapshotFetcher = Callable[..., Awaitable[tuple[bytes, str]]]
+SnapshotFetcher = Callable[[], Awaitable[tuple[bytes, str]]]
 
 
 @dataclass(frozen=True)

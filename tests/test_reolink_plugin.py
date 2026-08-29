@@ -36,13 +36,11 @@ from episode.plugins.reolink.device import (
     device_config,
 )
 from episode.plugins.reolink.events import (
-    ReolinkEvent,
     interpret_event,
     parse_alarm_event_frame,
     parse_battery_status_frame,
 )
 from episode.plugins.reolink.plugin import ReolinkPlugin
-
 
 # ---------------------------------------------------------------------------
 # Crypto round-trips
@@ -86,7 +84,7 @@ def test_parse_alarm_event_frame_motion():
 def test_parse_alarm_event_frame_person():
     xml = b"<Event><cmd>PersonDetect</cmd><state>true</state></Event>"
     events = parse_alarm_event_frame(xml, channel=0)
-    assert events[0].event_type == "person_detection"
+    assert events[0].event_type == "human_detection"
 
 
 def test_parse_alarm_event_frame_encrypted_body():
@@ -99,7 +97,7 @@ def test_parse_alarm_event_frame_encrypted_body():
 
 def test_parse_alarm_event_frame_alarm_event_human():
     """Reolink native AlarmEventList -> AlarmEvent with AItype must map to
-    person_detection, not the generic 'system' type."""
+    human_detection, not the generic 'system' type."""
     xml = (
         b"<AlarmEventList>"
         b"<AlarmEvent>"
@@ -112,7 +110,7 @@ def test_parse_alarm_event_frame_alarm_event_human():
     )
     events = parse_alarm_event_frame(xml, channel=0)
     assert len(events) == 1
-    assert events[0].event_type == "person_detection"
+    assert events[0].event_type == "human_detection"
     assert events[0].event_state == "active"
 
 
@@ -133,7 +131,7 @@ def test_parse_alarm_event_frame_alarm_event_vehicle():
 
 def test_parse_alarm_event_frame_type_list_people():
     """Reolink push payloads carry the subtype in a list-valued 'type' field
-    (e.g. type=['intrusion','people']). These must map to person_detection,
+    (e.g. type=['intrusion','people']). These must map to human_detection,
     not 'system'."""
     payload = {
         "@attributes": [{"version": "1.1"}, {"version": "1.1"}],
@@ -149,7 +147,7 @@ def test_parse_alarm_event_frame_type_list_people():
         "frameIndex": 3046504,
     }
     event = interpret_event(payload)
-    assert event.event_type == "person_detection"
+    assert event.event_type == "human_detection"
 
 
 def test_parse_alarm_event_frame_type_list_vehicle():
@@ -191,7 +189,7 @@ def test_parse_alarm_event_frame_multiple_alarm_events():
     )
     events = parse_alarm_event_frame(xml, channel=0)
     assert len(events) == 2
-    assert events[0].event_type == "person_detection"
+    assert events[0].event_type == "human_detection"
     assert events[1].event_type == "vehicle_detection"
 
 
@@ -295,12 +293,12 @@ async def test_dispatcher_routes_response_and_events_without_dropping():
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_timeout_removes_waiter():
+async def test_dispatcher_eof_fails_and_removes_waiter():
     reader = FakeFrameReader([])  # no frames arrive
     dispatcher = BaichuanFrameDispatcher(reader)
     dispatcher.start()
     try:
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(ConnectionError):
             await dispatcher.request(146, timeout=0.05)
         # The waiter must be cleaned up so a later frame isn't misrouted
         assert all(fut.done() for _, fut in dispatcher._waiters)
@@ -571,6 +569,40 @@ async def test_status_capabilities_reflect_discovery_failure():
     assert "snapshots" not in connection.status().capabilities
 
 
+@pytest.mark.asyncio
+async def test_stream_discovery_registers_conventional_rtsp_paths():
+    from episode.plugins.reolink.client import BaichuanApiClient
+
+    response = bc_encrypt(
+        b"<body><StreamInfoList><StreamInfo><encodeTable>"
+        b"<width>1920</width><height>1080</height>"
+        b"</encodeTable></StreamInfo></StreamInfoList></body>",
+        offset=250,
+    )
+
+    class Writer:
+        def write(self, _data):
+            pass
+
+        async def drain(self):
+            pass
+
+    class Dispatcher:
+        async def request(self, cmd_id, *, timeout, predicate=None, send=None):
+            if send is not None:
+                await send()
+            return cmd_id, 200, 0, response
+
+    client = BaichuanApiClient("192.168.1.10", "admin", "secret")
+    client._writer = Writer()
+    client._dispatcher = Dispatcher()
+    result = await client._get_stream_url_impl(0, 1, "", b"", 0)
+
+    assert result.success is True
+    assert result.main_stream_url == "rtsp://192.168.1.10:554/Preview_01_main"
+    assert result.sub_stream_url == "rtsp://192.168.1.10:554/Preview_01_sub"
+
+
 def _make_event_config(*, events_enabled=True):
     return ReolinkDeviceConfig(
         device=Device(
@@ -620,10 +652,7 @@ async def test_connection_does_not_start_event_listener_when_disabled():
 
 
 @pytest.mark.asyncio
-async def test_connection_delivers_bytes_payload():
-    """Event deliveries must serialize metadata to bytes for the ingress sink."""
-    import json
-
+async def test_connection_preserves_original_frame_bytes():
     received = []
 
     async def capture_sink(delivery):
@@ -638,72 +667,39 @@ async def test_connection_delivers_bytes_payload():
     )
     await connection.start()
     try:
-        event = ReolinkEvent(
-            event_type="motion_detection",
-            event_state="active",
-            device_id="cam-1",
-            metadata={"integration": "reolink", "motion": True},
-        )
-        await connection._deliver_event(event, datetime.now(tz=timezone.utc))
+        payload = b"\x00\x01encrypted-camera-frame"
+        await connection._process_event_frame(33, payload, 250)
         assert len(received) == 1
         delivery = received[0]
-        assert isinstance(delivery.payload, bytes)
-        assert delivery.media_type == "application/json"
-        parsed = json.loads(delivery.payload)
-        assert parsed["integration"] == "reolink"
+        assert delivery.payload == payload
+        assert delivery.media_type == "application/octet-stream"
+        assert delivery.artifact_type == "event_frame"
+        assert delivery.metadata["kind"] == "raw_event_frame"
+        assert delivery.metadata["command_id"] == 33
     finally:
         await connection.stop()
 
 
 @pytest.mark.asyncio
-async def test_connection_dedups_repeated_state_but_releases_after_window():
-    """Repeated identical events within the window are suppressed, but the
-    same state is delivered again once the dedup window has elapsed."""
-    from datetime import timedelta
-
+async def test_connection_preserves_repeated_frames_before_deduplication():
     received = []
 
     async def capture_sink(delivery):
         received.append(delivery)
 
     client = FakeBaichuanClient()
-    config = _make_event_config(events_enabled=True)
-    config = dataclasses.replace(config, dedup_window=0.1)
     connection = ReolinkDeviceConnection(
-        config,
+        _make_event_config(events_enabled=True),
         capture_sink,
         async_noop,
         client_factory=lambda _config: client,
     )
     await connection.start()
     try:
-        base = datetime.now(tz=timezone.utc)
-
-        # First event: delivered.
-        await connection._process_event_frame(
-            33,
-            b"<Event><cmd>MotionDetect</cmd><state>true</state></Event>",
-            0,
-        )
-        assert len(received) == 1
-
-        # Immediate repeat: suppressed by the dedup window.
-        await connection._process_event_frame(
-            33,
-            b"<Event><cmd>MotionDetect</cmd><state>true</state></Event>",
-            0,
-        )
-        assert len(received) == 1
-
-        # Simulate a later detection (past the window): delivered again.
-        connection._last_delivered_at = {}
-        connection._last_delivered_at[("motion_detection", "active")] = base - timedelta(seconds=1)
-        await connection._process_event_frame(
-            33,
-            b"<Event><cmd>MotionDetect</cmd><state>true</state></Event>",
-            0,
-        )
-        assert len(received) == 2
+        payload = b"<Event><cmd>MotionDetect</cmd><state>true</state></Event>"
+        await connection._process_event_frame(33, payload, 0)
+        await connection._process_event_frame(33, payload, 0)
+        assert [delivery.payload for delivery in received] == [payload, payload]
     finally:
         await connection.stop()
 
@@ -837,12 +833,79 @@ def _envelope(*, device_id="cam-1", event_type="motion_detection", event_state="
         area_id="area-1",
         metadata={
             "plugin_id": "reolink",
+            "kind": "event_notification",
             "event_type": event_type,
             "event_state": event_state,
             "channel": 0,
             "event_id": "evt-1",
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_handler_preserves_then_expands_raw_frame():
+    from episode.ingestion.models import ReceiptStatus, StoredIngressEnvelope
+
+    derived = []
+
+    async def capture(delivery):
+        derived.append(delivery)
+
+    plugin = ReolinkPlugin(
+        PluginContext(
+            plugins_dir="plugins",
+            configured_devices=(_valid_device_mapping(),),
+            ingress_router=FakeRouter(),
+            raw_delivery_sink=capture,
+            device_update_sink=async_noop,
+        )
+    )
+    connection = ReolinkDeviceConnection(
+        _make_event_config(events_enabled=True),
+        capture,
+        async_noop,
+        client_factory=lambda _config: FakeBaichuanClient(),
+    )
+    plugin._connections = [connection]
+    raw = StoredIngressEnvelope(
+        receipt_id="raw-receipt",
+        artifact_id="raw-artifact",
+        source="reolink:events",
+        transport="plugin",
+        received_at=datetime.now(tz=timezone.utc),
+        payload=b"<Event><cmd>PersonDetect</cmd><state>true</state></Event>",
+        media_type="application/octet-stream",
+        device_id="cam-1",
+        area_id="area-1",
+        metadata={
+            "plugin_id": "reolink",
+            "kind": "raw_event_frame",
+            "command_id": 33,
+            "channel": 0,
+            "nonce": "",
+            "use_aes": False,
+        },
+    )
+
+    expanded = await plugin._handle(raw)
+
+    assert expanded.status == ReceiptStatus.IGNORED
+    assert expanded.metadata["notification_count"] == 1
+    assert len(derived) == 1
+    assert derived[0].artifact_type == "derived_event_notification"
+    assert derived[0].metadata["parent_receipt_id"] == "raw-receipt"
+
+    notification = dataclasses.replace(
+        raw,
+        receipt_id="derived-receipt",
+        artifact_id="derived-artifact",
+        payload=derived[0].payload,
+        media_type=derived[0].media_type,
+        metadata={"plugin_id": "reolink", **dict(derived[0].metadata)},
+    )
+    interpreted = await plugin._handle(notification)
+    assert interpreted.event is not None
+    assert interpreted.event.event_type == "human_detection"
 
 
 @pytest.mark.asyncio
@@ -890,7 +953,6 @@ async def test_handler_emits_on_state_change():
 async def test_handler_registers_same_state_after_window():
     """A repeated state after the dedup window must be registered again."""
     from datetime import timedelta
-    from episode.ingestion.models import StoredIngressEnvelope
 
     plugin = _make_plugin()
     first = await plugin._handle(_envelope(event_type="motion_detection", event_state="active"))
@@ -910,7 +972,10 @@ async def test_handler_rejects_missing_fields():
 
     plugin = _make_plugin()
     env = _envelope()
-    env = dataclasses.replace(env, metadata={"plugin_id": "reolink"})
+    env = dataclasses.replace(
+        env,
+        metadata={"plugin_id": "reolink", "kind": "event_notification"},
+    )
     result = await plugin._handle(env)
     assert result.status == ReceiptStatus.REJECTED
 
@@ -1042,7 +1107,7 @@ class FakeDeviceInfo:
 
 
 def _make_validation_device():
-    from episode.domain.models import CapabilityConfig, Device
+    from episode.domain.models import Device
 
     return Device(
         id="cam-1",
@@ -1058,7 +1123,6 @@ def _make_validation_device():
 
 def test_validate_device_supported(monkeypatch):
     from episode.plugins.reolink import validation as validation_module
-    from episode.plugins.reolink.client import ReolinkLoginError
 
     async def fake_login(_self):
         return FakeDeviceInfo()
@@ -1101,6 +1165,21 @@ def test_validate_device_auth_failed(monkeypatch):
     assert result["status"] == "authentication_failed"
 
 
+def test_validate_device_closes_client_after_failure(monkeypatch):
+    from episode.plugins.reolink import validation as validation_module
+    from episode.plugins.reolink.client import ReolinkLoginError
+
+    client = FakeClient(ReolinkLoginError("bad credentials"))
+    monkeypatch.setattr(validation_module, "BaichuanApiClient", lambda **_kwargs: client)
+
+    result = asyncio.run(
+        validation_module.validate_device(_make_validation_device(), "2026-01-01T00:00:00Z", 5.0)
+    )
+
+    assert result["status"] == "authentication_failed"
+    assert client.closed is True
+
+
 def test_validate_device_unavailable(monkeypatch):
     from episode.plugins.reolink import validation as validation_module
     from episode.plugins.reolink.client import ReolinkError
@@ -1141,17 +1220,8 @@ def test_validate_device_reports_full_capabilities(monkeypatch):
     async def fake_get_stream_url(_self, channel=0):
         return FakeStreamUrlInfo(success=True, main_stream_url="rtsp://192.168.1.10/1")
 
-    async def fake_get_ability_info(_self):
-        # Ability XML with alarm / network tokens -> events supported
-        return {
-            "Extension": {
-                "Ability": {
-                    "network": {"support": "1"},
-                    "alarm": {"support": "1"},
-                    "streaming": {"support": "1"},
-                }
-            }
-        }
+    async def fake_subscribe_events(_self):
+        return True
 
     async def fake_get_snapshot(_self, channel=0):
         # Minimal valid JPEG header
@@ -1160,7 +1230,7 @@ def test_validate_device_reports_full_capabilities(monkeypatch):
     monkeypatch.setattr(validation_module.BaichuanApiClient, "login", fake_login)
     monkeypatch.setattr(validation_module.BaichuanApiClient, "get_stream_url", fake_get_stream_url)
     monkeypatch.setattr(
-        validation_module.BaichuanApiClient, "get_ability_info", fake_get_ability_info
+        validation_module.BaichuanApiClient, "subscribe_events", fake_subscribe_events
     )
     monkeypatch.setattr(validation_module.BaichuanApiClient, "get_snapshot", fake_get_snapshot)
 
@@ -1193,8 +1263,8 @@ def test_validate_device_probe_failures_keep_discovery(monkeypatch):
     async def fake_get_stream_url(_self, channel=0):
         raise ReolinkError("stream probe failed")
 
-    async def fake_get_ability_info(_self):
-        raise ReolinkError("ability probe failed")
+    async def fake_subscribe_events(_self):
+        raise ReolinkError("event subscription probe failed")
 
     async def fake_get_snapshot(_self, channel=0):
         raise ReolinkError("snapshot probe failed")
@@ -1202,7 +1272,7 @@ def test_validate_device_probe_failures_keep_discovery(monkeypatch):
     monkeypatch.setattr(validation_module.BaichuanApiClient, "login", fake_login)
     monkeypatch.setattr(validation_module.BaichuanApiClient, "get_stream_url", fake_get_stream_url)
     monkeypatch.setattr(
-        validation_module.BaichuanApiClient, "get_ability_info", fake_get_ability_info
+        validation_module.BaichuanApiClient, "subscribe_events", fake_subscribe_events
     )
     monkeypatch.setattr(validation_module.BaichuanApiClient, "get_snapshot", fake_get_snapshot)
 
@@ -1228,9 +1298,8 @@ def test_validate_device_reports_media_without_events_or_snapshots(monkeypatch):
     async def fake_get_stream_url(_self, channel=0):
         return FakeStreamUrlInfo(success=True, main_stream_url="rtsp://192.168.1.10/1")
 
-    async def fake_get_ability_info(_self):
-        # No alarm / IO / network tokens -> events unsupported
-        return {"Extension": {"Ability": {"video": {"support": "1"}}}}
+    async def fake_subscribe_events(_self):
+        return False
 
     async def fake_get_snapshot(_self, channel=0):
         return None  # no JPEG
@@ -1238,7 +1307,7 @@ def test_validate_device_reports_media_without_events_or_snapshots(monkeypatch):
     monkeypatch.setattr(validation_module.BaichuanApiClient, "login", fake_login)
     monkeypatch.setattr(validation_module.BaichuanApiClient, "get_stream_url", fake_get_stream_url)
     monkeypatch.setattr(
-        validation_module.BaichuanApiClient, "get_ability_info", fake_get_ability_info
+        validation_module.BaichuanApiClient, "subscribe_events", fake_subscribe_events
     )
     monkeypatch.setattr(validation_module.BaichuanApiClient, "get_snapshot", fake_get_snapshot)
 

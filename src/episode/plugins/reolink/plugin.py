@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Mapping
 from dataclasses import replace
@@ -15,6 +16,7 @@ from episode.plugins.models import (
     PluginInstanceStatus,
     PluginState,
     PluginStatus,
+    RawPluginDelivery,
 )
 from episode.plugins.reolink.device import ReolinkDeviceConnection, device_config
 
@@ -90,11 +92,95 @@ class ReolinkPlugin:
         return envelope.transport == "plugin" and envelope.metadata.get("plugin_id") == PLUGIN_ID
 
     async def _handle(self, envelope: StoredIngressEnvelope) -> IngressHandlerResult:
-        """Interpret a delivered Reolink event envelope into an EventObservation,
-        suppressing repeated states via the per-device tracker."""
+        """Expand preserved frames, then interpret their derived notifications."""
+        kind = envelope.metadata.get("kind")
+        if kind == "raw_event_frame":
+            command_id = envelope.metadata.get("command_id")
+            channel = envelope.metadata.get("channel", 0)
+            if not isinstance(command_id, int) or not isinstance(channel, int):
+                return IngressHandlerResult(
+                    claimed=True,
+                    status=ReceiptStatus.REJECTED,
+                    metadata={"reason": "invalid_frame_metadata"},
+                )
+            connection = next(
+                (item for item in self._connections if item.config.device.id == envelope.device_id),
+                None,
+            )
+            if connection is None:
+                return IngressHandlerResult(
+                    claimed=True,
+                    status=ReceiptStatus.REJECTED,
+                    metadata={"reason": "device_connection_unavailable"},
+                )
+            if command_id == 252:
+                return IngressHandlerResult(
+                    claimed=True,
+                    status=ReceiptStatus.IGNORED,
+                    metadata={"reason": "device_telemetry", "command_id": command_id},
+                )
+            nonce = envelope.metadata.get("nonce")
+            use_aes = envelope.metadata.get("use_aes")
+            events = connection.decode_event_frame(
+                command_id,
+                envelope.payload,
+                channel,
+                nonce=nonce if isinstance(nonce, str) else None,
+                use_aes=use_aes if isinstance(use_aes, bool) else None,
+            )
+            if self._delivery_sink is None:
+                return IngressHandlerResult(
+                    claimed=True,
+                    status=ReceiptStatus.REJECTED,
+                    metadata={"reason": "derived_delivery_storage_unavailable"},
+                )
+            for index, event in enumerate(events):
+                await self._delivery_sink(
+                    RawPluginDelivery(
+                        plugin_id=PLUGIN_ID,
+                        device_id=envelope.device_id,
+                        area_id=envelope.area_id,
+                        received_at=envelope.received_at,
+                        payload=json.dumps(
+                            event.raw_payload or event.metadata,
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8"),
+                        source="reolink:events",
+                        media_type="application/json",
+                        artifact_type="derived_event_notification",
+                        metadata={
+                            "kind": "event_notification",
+                            "integration": "reolink",
+                            "parent_receipt_id": envelope.receipt_id,
+                            "notification_index": index,
+                            "event_type": event.event_type,
+                            "event_state": event.event_state,
+                            "observed_at": event.timestamp.isoformat(),
+                            "channel": event.channel,
+                            "event_id": event.event_id,
+                        },
+                    )
+                )
+            return IngressHandlerResult(
+                claimed=True,
+                status=ReceiptStatus.IGNORED,
+                metadata={
+                    "reason": "expanded_to_notifications" if events else "no_notifications",
+                    "notification_count": len(events),
+                },
+            )
+
+        if kind != "event_notification":
+            return IngressHandlerResult(claimed=False)
+
         event_type = envelope.metadata.get("event_type")
         event_state = envelope.metadata.get("event_state")
-        if not event_type or not event_state:
+        if (
+            not isinstance(event_type, str)
+            or not event_type
+            or event_state not in {"active", "inactive"}
+        ):
             logger.debug(
                 "Reolink handler: envelope missing event type/state for device %s",
                 envelope.device_id,
@@ -125,10 +211,18 @@ class ReolinkPlugin:
             self._event_counts[envelope.device_id],
         )
 
+        observed_at = envelope.received_at
+        raw_observed_at = envelope.metadata.get("observed_at")
+        if isinstance(raw_observed_at, str):
+            try:
+                observed_at = datetime.fromisoformat(raw_observed_at)
+            except ValueError:
+                pass
+
         return IngressHandlerResult(
             claimed=True,
             event=EventObservation(
-                timestamp=envelope.received_at,
+                timestamp=observed_at,
                 event_type=event_type,
                 event_state=event_state,
                 source="reolink:events",

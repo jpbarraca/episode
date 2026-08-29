@@ -9,7 +9,6 @@ Handles the lifecycle of a Reolink camera connection including:
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -28,12 +27,13 @@ from episode.plugins.models import (
 from episode.plugins.reolink.client import (
     BaichuanApiClient,
     ReolinkDeviceInfo,
-    StreamUrlInfo,
     ReolinkError,
     ReolinkLoginError,
     ReolinkStreamError,
+    StreamUrlInfo,
 )
 from episode.plugins.reolink.events import (
+    ReolinkEvent,
     parse_alarm_event_frame,
     parse_battery_status_frame,
 )
@@ -86,7 +86,7 @@ class ReolinkDeviceConnection:
         *,
         media_registry: PluginMediaRegistry | None = None,
         client_factory: ClientFactory = _default_client_factory,
-    ):
+    ) -> None:
         """Initialize the device connection with its config and sinks."""
         self.config = config
         self._delivery_sink = delivery_sink
@@ -100,10 +100,6 @@ class ReolinkDeviceConnection:
         self._task: asyncio.Task | None = None
         self._event_task: asyncio.Task | None = None
         self._running = False
-        # Per-(event_type, event_state) last-delivered timestamp, used to
-        # suppress the rapid repeated frames cameras push during a detection
-        # without permanently dropping later detections of the same state.
-        self._last_delivered_at: dict[tuple[str, str], datetime] = {}
         self._status = PluginInstanceStatus(
             id=config.device.id,
             name=config.device.name,
@@ -432,14 +428,9 @@ class ReolinkDeviceConnection:
                 # otherwise-quiet authenticated session, which would silently
                 # end the event subscription. Ping each loop so the session
                 # (and the cmdId=31 subscription) stays alive.
-                try:
-                    await self._client.ping()
-                except Exception as error:
-                    logger.debug(
-                        "Reolink:%s keepalive ping failed: %s",
-                        self.config.device.name,
-                        error,
-                    )
+                if not await self._client.ping():
+                    await self._client.close()
+                    raise ReolinkError("Keepalive failed; reconnecting")
 
                 # Capabilities are static per camera and already applied during
                 # startup discovery (_apply_discovery); no periodic refresh or
@@ -495,6 +486,9 @@ class ReolinkDeviceConnection:
                             exc,
                         )
 
+                if self._running:
+                    await asyncio.sleep(self.config.event_retry_delay)
+
             except asyncio.CancelledError:
                 logger.debug(
                     "Reolink:%s event listener cancelled",
@@ -520,86 +514,24 @@ class ReolinkDeviceConnection:
         """
         now = datetime.now(tz=timezone.utc)
 
-        events = []
         dec = self._client.decryption_params
-        dec_nonce: str = dec.get("nonce", "")
-        dec_password: str = dec.get("password", "")
-        dec_use_aes: bool = bool(dec.get("use_aes", False))
-
-        if cmd_id == 33:  # AlarmEventList
-            parsed_events = parse_alarm_event_frame(
-                body,
-                channel=channel,
-                nonce=dec_nonce,
-                password=dec_password,
-                use_aes=dec_use_aes,
-            )
-            events.extend(parsed_events)
-            logger.debug("Reolink:%s parsed %d alarm events", self.config.device.name, len(events))
-
-        elif cmd_id == 252:  # BatteryStatus
-            event = parse_battery_status_frame(
-                body,
-                channel=channel,
-                nonce=dec_nonce,
-                password=dec_password,
-                use_aes=dec_use_aes,
-            )
-            if event:
-                events.append(event)
-
-        if not events:
-            logger.debug(
-                "Reolink:%s no events for cmdId=%d",
-                self.config.device.name,
-                cmd_id,
-            )
-            return
-
-        # Deliver each event, suppressing only the rapid repeated frames
-        # cameras push during a detection. A state change, or the same state
-        # after a quiet interval, is still delivered.
-        dedup_window = getattr(self.config, "dedup_window", 5.0)
-        for event in events:
-            key = (event.event_type, event.event_state)
-            last_at = self._last_delivered_at.get(key)
-            if last_at is not None and (now - last_at).total_seconds() < dedup_window:
-                logger.debug(
-                    "Reolink:%s skipping repeated event: type=%s state=%s",
-                    self.config.device.name,
-                    event.event_type,
-                    event.event_state,
-                )
-                continue
-            self._last_delivered_at[key] = now
-            await self._deliver_event(event, now)
-
-    async def _deliver_event(self, event, received_at: datetime) -> None:
-        """Deliver a parsed event to the delivery sink."""
-        logger.debug(
-            "Reolink:%s delivering event: type=%s state=%s",
-            self.config.device.name,
-            event.event_type,
-            event.event_state,
-        )
-
-        payload_bytes = json.dumps(event.metadata).encode("utf-8")
         await self._delivery_sink(
             RawPluginDelivery(
                 plugin_id="reolink",
                 device_id=self.config.device.id,
                 area_id=self.config.device.area_id,
-                received_at=received_at,
-                payload=payload_bytes,
+                received_at=now,
+                payload=body,
                 source="reolink:events",
-                media_type="application/json",
-                artifact_type="event_notification",
+                media_type="application/octet-stream",
+                artifact_type="event_frame",
                 metadata={
+                    "kind": "raw_event_frame",
                     "integration": "reolink",
-                    "event_type": event.event_type,
-                    "event_state": event.event_state,
-                    "channel": event.channel,
-                    "event_id": event.event_id,
+                    "command_id": cmd_id,
+                    "channel": channel,
+                    "nonce": str(dec.get("nonce", "")),
+                    "use_aes": bool(dec.get("use_aes", False)),
                 },
             )
         )
@@ -607,9 +539,41 @@ class ReolinkDeviceConnection:
         self._status = replace(
             self._status,
             messages_received=self._status.messages_received + 1,
-            last_message_at=received_at,
+            last_message_at=now,
             error=None,
         )
+
+    def decode_event_frame(
+        self,
+        cmd_id: int,
+        body: bytes,
+        channel: int,
+        *,
+        nonce: str | None = None,
+        use_aes: bool | None = None,
+    ) -> list[ReolinkEvent]:
+        """Interpret a previously preserved frame using this session's cipher state."""
+        dec = self._client.decryption_params
+        frame_nonce = nonce if nonce is not None else str(dec.get("nonce", ""))
+        frame_uses_aes = use_aes if use_aes is not None else bool(dec.get("use_aes", False))
+        if cmd_id == 33:
+            return parse_alarm_event_frame(
+                body,
+                channel=channel,
+                nonce=frame_nonce,
+                password=str(dec.get("password", "")),
+                use_aes=frame_uses_aes,
+            )
+        if cmd_id == 252:
+            event = parse_battery_status_frame(
+                body,
+                channel=channel,
+                nonce=frame_nonce,
+                password=str(dec.get("password", "")),
+                use_aes=frame_uses_aes,
+            )
+            return [event] if event is not None else []
+        return []
 
     def _set_error(self, error: Exception) -> None:
         """Update status state/error based on the exception type."""

@@ -22,7 +22,7 @@ from episode.plugins.reolink.client import (
 logger = logging.getLogger(__name__)
 
 EVENT_MAP = {
-    "person_detection": ("human", "person", "people"),
+    "human_detection": ("human", "person", "people"),
     "vehicle_detection": ("vehicle", "car"),
     "pet_detection": ("pet", "animal"),
     "ladder_detection": ("ladder",),
@@ -442,10 +442,8 @@ def _map_event_type(payload: dict[str, Any]) -> str:
     cmd = payload.get("cmd", "")
     event_type_val = payload.get("type", "")
     channel_event = payload.get("channelEvent", "")
-    eventType = payload.get("eventType", "")
+    event_type = payload.get("eventType", "")
     ai_type = payload.get("AItype") or payload.get("aiType") or payload.get("aitype") or ""
-
-    type_str = str(cmd or event_type_val or channel_event or eventType or "").lower()
 
     def get_strings_to_check():
         """Yield candidate type strings, from AItype, type fields, and any
@@ -455,7 +453,7 @@ def _map_event_type(payload: dict[str, Any]) -> str:
 
         # 2: type_str (also covers list-valued fields via their repr, e.g.
         #    type=["intrusion","people"] -> "['intrusion', 'people']")
-        yield str(cmd or event_type_val or channel_event or eventType or "").lower()
+        yield str(cmd or event_type_val or channel_event or event_type or "").lower()
 
         # 3: all string values anywhere in the payload, including list-valued
         #    fields (type) and nested structures (_value array).

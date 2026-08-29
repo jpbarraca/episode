@@ -1,9 +1,8 @@
 """Reolink Baichuan binary protocol client.
 
-Implements the proprietary binary protocol used by Reolink cameras over raw TCP
-port 9000. This replaces the incorrect HTTP/JSON implementation.
-
-Uses nodelink-js as reference.
+Implements the subset of the proprietary protocol that Episode uses over raw
+TCP port 9000. The implementation was informed by the MIT-licensed nodelink-js
+protocol documentation.
 """
 
 from __future__ import annotations
@@ -11,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import struct as _struct
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Awaitable, Callable
-import xml.etree.ElementTree as ET
-import struct as _struct
+
 from Crypto.Cipher import AES
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ MAGIC_REV: bytes = b"\xa0\xcb\xed\x0f"  # Reversed magic (some cameras)
 
 HEADER_20 = 20
 HEADER_24 = 24
+MAX_FRAME_BYTES = 32 * 1024 * 1024
 
 BC_CLASS_LEGACY = 0x6514
 BC_CLASS_MODERN_20 = 0x6614
@@ -303,7 +304,9 @@ def build_ability_info_xml(username: str = "admin") -> str:
     """Build <Extension> XML for ability info query."""
     root = ET.Element("Extension", version="1.1")
     ET.SubElement(root, "userName").text = username
-    ET.SubElement(root, "token").text = (
+    ET.SubElement(
+        root, "token"
+    ).text = (
         "system, streaming, PTZ, IO, security, replay, disk, network, alarm, record, video, image"
     )
     return _serialize_xml(root)
@@ -401,6 +404,8 @@ class BaichuanFrameReader:
             return None
 
         body_len = _struct.unpack_from("<I", data, start + 8)[0]
+        if body_len > MAX_FRAME_BYTES:
+            raise ReolinkError(f"Baichuan frame exceeds {MAX_FRAME_BYTES} bytes")
         total = header_size + body_len
 
         if start + total > len(data):
@@ -489,7 +494,7 @@ class BaichuanFrameDispatcher:
         self._frame_reader = frame_reader
         self._lock = asyncio.Lock()
         self._waiters: list[tuple[Callable[[int], bool], asyncio.Future]] = []
-        self._event_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue(maxsize=256)
+        self._event_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(maxsize=256)
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -502,6 +507,11 @@ class BaichuanFrameDispatcher:
             self._dispatch_loop(),
             name="reolink:frame-dispatcher",
         )
+
+    @property
+    def running(self) -> bool:
+        """Return whether the dispatcher is actively consuming the socket."""
+        return self._running and self._task is not None and not self._task.done()
 
     async def stop(self) -> None:
         """Stop the background dispatch loop."""
@@ -544,6 +554,16 @@ class BaichuanFrameDispatcher:
             logger.debug("Frame dispatcher stopped: %s", exc)
         finally:
             self._running = False
+            async with self._lock:
+                for _, future in self._waiters:
+                    if not future.done():
+                        future.set_exception(ConnectionError("Baichuan connection closed"))
+                self._waiters.clear()
+            try:
+                self._event_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                self._event_queue.get_nowait()
+                self._event_queue.put_nowait(None)
 
     async def request(
         self,
@@ -586,9 +606,12 @@ class BaichuanFrameDispatcher:
         """Continuously yield push-event frames routed by the dispatcher."""
         while self._running or not self._event_queue.empty():
             try:
-                cmd_id, body = await self._event_queue.get()
+                item = await self._event_queue.get()
             except asyncio.CancelledError:
                 return
+            if item is None:
+                return
+            cmd_id, body = item
             yield cmd_id, body
 
 
@@ -657,6 +680,7 @@ class BaichuanApiClient:
         self._msg_num: int = 0
         self._connected: bool = False
         self._host_channel_id: int = 250  # Default, may change to 0 on retry
+        self._snapshot_lock = asyncio.Lock()
 
         # Event state tracking (per-channel, for transition detection)
         self._alarm_event_state: dict[int, dict[str, Any]] = defaultdict(dict)
@@ -669,7 +693,13 @@ class BaichuanApiClient:
     @property
     def authenticated(self) -> bool:
         """Return True if connected and a session token has been negotiated."""
-        return self._connected and bool(self._token)
+        writer_open = (
+            self._writer is not None and not getattr(self._writer, "is_closing", lambda: False)()
+        )
+        dispatcher_running = self._dispatcher is not None and bool(
+            getattr(self._dispatcher, "running", True)
+        )
+        return self._connected and bool(self._token) and writer_open and dispatcher_running
 
     @property
     def host_channel_id(self) -> int:
@@ -714,7 +744,6 @@ class BaichuanApiClient:
         self._connected = True
         # Enable TCP keep-alive at OS level
         try:
-            loop = asyncio.get_running_loop()
             sock = self._reader.transport.get_extra_info("socket")
             if sock:
                 sock.setsockopt(sock.SOL_SOCKET, sock.SO_KEEPALIVE, 1)
@@ -743,6 +772,8 @@ class BaichuanApiClient:
                 await self._dispatcher.stop()
                 self._dispatcher = None
             self._connected = False
+            self._token = ""
+            self._nonce = ""
             logger.debug("Connection closed for %s:%d", self.host, self.api_port)
 
     async def _reset_connection(self) -> None:
@@ -765,6 +796,8 @@ class BaichuanApiClient:
             await self._dispatcher.stop()
             self._dispatcher = None
         self._connected = False
+        self._token = ""
+        self._nonce = ""
 
     def _next_msg_num(self) -> int:
         """Generate next message number."""
@@ -847,10 +880,6 @@ class BaichuanApiClient:
         frame = encode_frame(cmd_id, body, use_24_header, **header_kwargs)
         self._writer.write(frame)
         await self._writer.drain()
-        header_size = "24-byte (modern)" if use_24_header else "20-byte (legacy)"
-        hex_str = " ".join(f"{b:02X}" for b in frame[:64])
-        if len(frame) > 64:
-            hex_str += " ..."
 
     async def _do_logout(self) -> None:
         """Send logout with encrypted XML body.
@@ -1147,7 +1176,16 @@ class BaichuanApiClient:
             for channel_id in channel_ids:
                 self._host_channel_id = channel_id
                 try:
-                    if not self._connected:
+                    connection_alive = (
+                        self._connected
+                        and self._writer is not None
+                        and not self._writer.is_closing()
+                        and self._dispatcher is not None
+                        and self._dispatcher.running
+                    )
+                    if not connection_alive:
+                        if self._connected:
+                            await self._reset_connection()
                         await self.connect()
                     info = await self._do_login_with_channel_id(channel_id)
                     logger.info("Login succeeded with channelId=%d", channel_id)
@@ -1405,7 +1443,14 @@ class BaichuanApiClient:
                     logger.info(
                         "Stream info: %d streams, first table: %s", len(streams), first_table
                     )
-                    return StreamUrlInfo(success=True, streams=streams)
+                    channel_number = channel + 1
+                    stream_base = f"rtsp://{self.host}:554/Preview_{channel_number:02d}"
+                    return StreamUrlInfo(
+                        main_stream_url=f"{stream_base}_main",
+                        sub_stream_url=f"{stream_base}_sub",
+                        success=True,
+                        streams=streams,
+                    )
                 else:
                     return StreamUrlInfo(success=False, error="No encode tables found")
             except ET.ParseError as e:
@@ -1506,14 +1551,14 @@ class BaichuanApiClient:
             """Fetch a snapshot, retrying on transient failures."""
             return await self._get_snapshot_impl(channel)
 
-        return await self._run_with_retry(_do)
+        async with self._snapshot_lock:
+            return await self._run_with_retry(_do)
 
     async def _get_snapshot_impl(self, channel: int = 0) -> bytes | None:
         """Request a snapshot image (single attempt)."""
         if not self.authenticated:
             raise ReolinkError("Not authenticated")
 
-        channel_id = self._host_channel_id
         # Standalone cameras expect the header channelId to be channel + 1,
         # with the channel selected via the Extension XML.
         header_channel_id = channel + 1
