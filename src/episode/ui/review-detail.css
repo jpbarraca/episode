@@ -330,6 +330,21 @@ a.review-detail-metric strong { color: var(--brand-cyan); }
 }
 .evidence-detail-file strong { color: var(--text-secondary); }
 .evidence-detail-file span { font-size: .7rem; }
+.recording-interruption-note {
+  align-items: center;
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 32%, var(--border-subtle));
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: .8rem 1rem;
+}
+.recording-interruption-note > div { display: flex; flex-direction: column; gap: .2rem; }
+.recording-interruption-note strong { color: var(--text-secondary); font-size: .8rem; }
+.recording-interruption-note span { color: var(--text-muted); font-size: .75rem; line-height: 1.45; }
+.recording-interruption-note a { color: var(--accent); flex: 0 0 auto; font-size: .76rem; font-weight: 650; }
+.evidence-interrupted-file svg { stroke: var(--warning); }
 .evidence-association-footer {
   align-items: center;
   border-top: 1px solid var(--border-subtle);

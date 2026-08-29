@@ -133,6 +133,7 @@
   height: 100%;
   justify-content: center;
   min-height: 0;
+  position: relative;
   width: 100%;
 }
 #carousel-slide video,

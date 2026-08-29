@@ -119,6 +119,23 @@ def system_router(context: ApiContext) -> APIRouter:
             await context.retention.get_policy()
             retention = context.retention.status()
             diagnostics["retention"] = retention
+        diagnostics["recording_issues"] = []
+        if hasattr(context.repository, "list_evidence"):
+            incomplete = await context.repository.list_evidence(
+                evidence_type="incomplete_recording",
+                available_only=True,
+                limit=10,
+            )
+            diagnostics["recording_issues"] = [
+                {
+                    "evidence_id": item.id,
+                    "episode_id": item.episode_id,
+                    "device_id": item.device_id,
+                    "timestamp": item.timestamp,
+                    "reason": item.metadata.get("reason"),
+                }
+                for item in incomplete
+            ]
         return _sanitize(diagnostics, context.data_dir)
 
     @router.get("/health", response_model=HealthResponse)

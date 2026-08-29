@@ -302,11 +302,17 @@ the Episode logs.
 Set `EPISODE_UID` and `EPISODE_GID` in `.env` to the host user that owns the data
 directory, then restart the container.
 
-### A restart left `.part` recording files
+### A restart interrupted a recording
 
-A `.part` file is the current FFmpeg working segment and is not published as
-Evidence until it closes and validates. Finalized earlier segments remain safe,
-but the current beta does not automatically repair or resume a segment
-interrupted by a container or host restart. Keep the file and surrounding logs
-when reporting the incident. When practical, allow active Episodes to finish
-before replacing the container.
+Current recordings use recoverable HLS bundles. Episode preserves completed
+fragments during shutdown and startup. If the persisted Episode is still active
+and its recording target can be reconstructed, capture resumes in the same
+logical Evidence bundle with a playlist discontinuity. Otherwise Episode
+finalizes the usable fragments as recording Evidence or reports the capture as
+incomplete. A restart may still create a capture gap or lose the fragment that
+was being written; it does not rewrite earlier fragments to conceal that gap.
+
+Legacy `.mp4.part` captures are probed separately on startup. A playable file is
+recovered as recording Evidence; an invalid partial remains visible as
+incomplete Evidence. Review **System → Recordings** and keep the surrounding
+logs when reporting a reproducible recovery problem.

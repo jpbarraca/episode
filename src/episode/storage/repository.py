@@ -550,6 +550,7 @@ class Repository:
         area_id: str | None = None,
         evidence_type: str | None = None,
         has_episode: bool | None = None,
+        available_only: bool | None = None,
     ) -> list[Evidence]:
         clauses = []
         params = []
@@ -570,6 +571,10 @@ class Repository:
             params.append(evidence_type)
         if has_episode is not None:
             clauses.append("e.episode_id IS NOT NULL" if has_episode else "e.episode_id IS NULL")
+        if available_only is not None:
+            clauses.append(
+                "x.evidence_id IS NULL" if available_only else "x.evidence_id IS NOT NULL"
+            )
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         rows = await self._conn.execute_fetchall(
             f"{_EVIDENCE_SELECT}{where} ORDER BY e.timestamp DESC, e.id DESC LIMIT ? OFFSET ?",

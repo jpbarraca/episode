@@ -69,6 +69,73 @@ export function renderIntegrationRows(integrations, showDetails = false) {
   </div>`;
 }
 
+function recordingOperationalState(state) {
+  if (state === "recording") return "healthy";
+  if (state === "starting") return "unknown";
+  if (state === "failed") return "unavailable";
+  return "degraded";
+}
+
+function recordingIssueSummary(reason) {
+  return {
+    startup_recovery: "Preserved after an application restart",
+    retry_limit_exceeded: "Camera stream could not be recovered",
+    episode_closed: "Episode closed while the stream was reconnecting",
+    application_shutdown: "Application stopped during recording",
+    recording_task_cancelled: "Recording task was interrupted",
+  }[reason] || (reason ? titleCase(reason) : "Capture did not complete");
+}
+
+export function renderRecordingOperations(recordings = [], metrics = {}, issues = []) {
+  const counters = [
+    ["Completed", metrics.completed_recordings || 0],
+    ["Reconnects", metrics.reconnects || 0],
+    ["Incomplete", metrics.incomplete_recordings || 0],
+    ["Failures", metrics.failures || 0],
+  ];
+  return `<section class="section recording-operations">
+    <div class="recording-operations-heading">
+      <div><h3>Recording activity</h3><p>Current capture progress and recovery state. Counters cover this application run.</p></div>
+      <span class="badge badge-neutral">${recordings.length} active</span>
+    </div>
+    ${recordings.length ? `<div class="resource-list">
+      ${recordings.map(recording => {
+        const state = recordingOperationalState(recording.state);
+        const progress = recording.last_fragment_at
+          ? `${plural(recording.fragment_count, "fragment")} · last ${fmtShort(recording.last_fragment_at)}`
+          : "Waiting for the first media fragment";
+        return `<div class="resource-row recording-operation-row">
+          <span class="status-indicator ${operationalIndicator(state)}"></span>
+          <div class="resource-main">
+            <strong>${escHtml(recording.device_id)}</strong>
+            <span>${escHtml(progress)}</span>
+          </div>
+          <span class="badge badge-${state}">${escHtml(titleCase(recording.state))}</span>
+          <div class="recording-operation-links">
+            <a href="#episode/${encodeURIComponent(recording.episode_id)}">Open Episode</a>
+            ${recording.reconnect_count ? `<span>${plural(recording.reconnect_count, "reconnect")}</span>` : ""}
+          </div>
+          ${recording.last_error ? `<div class="recording-operation-error">${escHtml(recording.last_error)}</div>` : ""}
+        </div>`;
+      }).join("")}
+    </div>` : '<div class="recording-idle"><span class="status-indicator online"></span><div><strong>Recorder ready</strong><span>No Episode is recording right now.</span></div></div>'}
+    <dl class="recording-counters">
+      ${counters.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join("")}
+    </dl>
+    ${issues.length ? `<div class="recording-issues">
+      <div class="recording-issues-heading"><h4>Interrupted recordings</h4><p>Available partial captures remain here until retention expires them. No action is required.</p></div>
+      ${issues.map(issue => `<div class="recording-issue-row">
+        <span class="status-indicator warning"></span>
+        <span><strong>${escHtml(issue.device_id)}</strong><small>${escHtml(recordingIssueSummary(issue.reason))} · ${fmtShort(issue.timestamp)}</small></span>
+        <span class="recording-issue-actions">
+          <a href="#evidence/${encodeURIComponent(issue.evidence_id)}">Review capture</a>
+          ${issue.episode_id ? `<a href="#episode/${encodeURIComponent(issue.episode_id)}">View Episode</a>` : ""}
+        </span>
+      </div>`).join("")}
+    </div>` : ""}
+  </section>`;
+}
+
 window.addArea = () => openAreaEditor(null, areas);
 window.editArea = id => {
   const area = inventoryAreas.find(candidate => candidate.id === id);
@@ -131,7 +198,7 @@ window.saveRetention = form => {
         enabled ? "success" : "warning",
       );
       await refreshRetentionPolicy();
-      await systemStatus();
+      await systemStatus("storage");
     },
   });
 };
@@ -319,7 +386,68 @@ export async function areas() {
   }
 }
 
-export async function systemStatus() {
+function systemNavigation(active) {
+  const sections = [
+    ["overview", "Overview"],
+    ["recordings", "Recordings"],
+    ["integrations", "Integrations"],
+    ["storage", "Storage"],
+  ];
+  return `<nav class="system-navigation" aria-label="System sections">
+    ${sections.map(([id, label]) => `<a href="#system${id === "overview" ? "" : `/${id}`}" class="${active === id ? "active" : ""}">${label}</a>`).join("")}
+  </nav>`;
+}
+
+function retentionStateBadge(retention) {
+  const state = retention.policy_state === "disabled"
+    ? "unavailable"
+    : retention.policy_state === "unconfirmed"
+    ? "unknown"
+    : "healthy";
+  return `<span class="badge badge-${state}">${escHtml(titleCase(retention.policy_state))}</span>`;
+}
+
+function renderRetentionSettings(retention) {
+  return `<section class="section system-retention">
+    <div class="system-retention-heading">
+      <div><h3>Visual Evidence retention</h3><p>One policy covers visual material managed by this OpenEpisode installation.</p></div>
+      ${retentionStateBadge(retention)}
+    </div>
+    <form class="system-retention-form" onsubmit="saveRetention(this); return false">
+      <label class="toggle-row system-retention-toggle">
+        <input name="retention_enabled" type="checkbox" value="true" ${retention.enabled ? "checked" : ""}>
+        <span><strong>Automatically delete managed visual Evidence</strong><small>Disable only if another process governs deletion or your use case requires indefinite retention.</small></span>
+      </label>
+      <label class="field system-retention-days">
+        <span>Retention period (days)</span>
+        <input name="retention_days" type="number" min="1" max="3650" required value="${retention.retention_days}">
+      </label>
+      <button type="submit" class="button button-primary system-retention-save">Save retention</button>
+      ${retention.policy_state === "unconfirmed" ? '<div class="field-span notice notice-warning"><strong>Confirmation required</strong><span>The active 30-day default has not yet been reviewed by an administrator.</span></div>' : ""}
+      ${retention.policy_state === "disabled" ? '<div class="field-span notice notice-danger"><strong>Automatic deletion is disabled</strong><span>Managed visual Evidence will remain until manually removed.</span></div>' : ""}
+      <div class="field-span configuration-note">${escHtml(retention.notice)}</div>
+    </form>
+  </section>`;
+}
+
+function systemOverview(diagnostics, services, filesystemLabel) {
+  const status = diagnostics.status;
+  return `<dl class="detail-facts section system-summary-facts">
+      <div><dt>Version</dt><dd>v${status.version}</dd></div>
+      <div><dt>Active recordings</dt><dd>${status.active_recordings}</dd></div>
+      <div><dt>Integrations</dt><dd>${status.integrations.healthy}/${status.integrations.total} healthy</dd></div>
+      <div><dt>Episode data</dt><dd>${fmtBytes(diagnostics.storage.data_bytes)}</dd></div>
+      <div><dt>Filesystem available</dt><dd>${filesystemLabel}</dd></div>
+    </dl>
+    <section class="section system-core-services">
+      <div class="system-section-heading"><div><h3>Core services</h3><p>The components required to receive Events and preserve Evidence.</p></div></div>
+      ${renderIntegrationRows(services)}
+    </section>`;
+}
+
+export async function systemStatus(requestedSection = "overview") {
+  const validSections = new Set(["overview", "recordings", "integrations", "storage"]);
+  const section = validSections.has(requestedSection) ? requestedSection : "overview";
   showLoading();
   try {
     const [diagnostics, retention] = await Promise.all([
@@ -327,52 +455,59 @@ export async function systemStatus() {
       api("/settings/retention"),
     ]);
     const status = diagnostics.status;
+    const recorder = diagnostics.services.find(service => service.id === "recorder") || {};
+    const filesystemTotal = diagnostics.storage.filesystem_total_bytes;
+    const filesystemFree = diagnostics.storage.filesystem_free_bytes;
+    const filesystemLabel = filesystemFree == null
+      ? "Unavailable"
+      : filesystemTotal
+      ? `${fmtBytes(filesystemFree)} free of ${fmtBytes(filesystemTotal)} (${Math.round(filesystemFree / filesystemTotal * 100)}%)`
+      : fmtBytes(filesystemFree);
     const services = diagnostics.services.map(service => ({
       ...service,
       type: "service",
       capabilities: [],
       details: service.metrics,
     }));
+    const descriptions = {
+      overview: "Runtime health and the areas that may need attention.",
+      recordings: "Current capture progress, recovery, and recent incomplete recordings.",
+      integrations: "Runtime health for connectors, plugins, and Device connections.",
+      storage: "Filesystem capacity and the visual Evidence retention policy.",
+    };
+    let content;
+    if (section === "recordings") {
+      content = renderRecordingOperations(
+        diagnostics.recordings,
+        recorder.metrics,
+        diagnostics.recording_issues,
+      );
+    } else if (section === "integrations") {
+      content = `<section class="section system-section">
+        <div class="system-section-heading"><div><h3>Integrations</h3><p>Open technical details only when diagnosing a connection.</p></div><span class="badge badge-neutral">${diagnostics.integrations.length} configured</span></div>
+        ${renderIntegrationRows(diagnostics.integrations, true)}
+      </section>`;
+    } else if (section === "storage") {
+      content = `<dl class="detail-facts section system-storage-facts">
+          <div><dt>Episode data</dt><dd>${fmtBytes(diagnostics.storage.data_bytes)}</dd></div>
+          <div><dt>Filesystem available</dt><dd>${filesystemLabel}</dd></div>
+        </dl>
+        ${renderRetentionSettings(retention)}`;
+    } else {
+      content = systemOverview(diagnostics, services, filesystemLabel);
+    }
     showContent(`
       ${pageHeader({
         eyebrow: "Operations",
-        title: "System",
-        description: "Runtime health, core services, and integration diagnostics.",
+        title: section === "overview" ? "System" : `System · ${titleCase(section)}`,
+        description: descriptions[section],
         status: operationalBadge(status.state),
         actions: `<a class="button button-ghost" href="${API}/diagnostics/export" download>Download diagnostics</a>`,
       })}
-      <dl class="detail-facts section">
-        <div><dt>Version</dt><dd>v${status.version}</dd></div>
-        <div><dt>Active recordings</dt><dd>${status.active_recordings}</dd></div>
-        <div><dt>Integrations</dt><dd>${status.integrations.healthy}/${status.integrations.total} healthy</dd></div>
-        <div><dt>Episode data</dt><dd>${fmtBytes(diagnostics.storage.data_bytes)}</dd></div>
-        <div><dt>Filesystem available</dt><dd>${fmtBytes(diagnostics.storage.filesystem_free_bytes)}</dd></div>
-      </dl>
-      <section class="section system-retention">
-        <div class="system-retention-heading">
-          <div><h3>Storage and retention</h3><p>One policy covers visual material managed by this OpenEpisode installation.</p></div>
-          <span class="badge badge-${retention.policy_state === "disabled" ? "unavailable" : retention.policy_state === "unconfirmed" ? "unknown" : "healthy"}">${escHtml(titleCase(retention.policy_state))}</span>
-        </div>
-        <form class="form-grid system-retention-form" onsubmit="saveRetention(this); return false">
-          <label class="toggle-row field-span">
-            <input name="retention_enabled" type="checkbox" value="true" ${retention.enabled ? "checked" : ""}>
-            <span><strong>Automatically delete managed visual Evidence</strong><small>Disable only if another process governs deletion or your use case requires indefinite retention.</small></span>
-          </label>
-          <label class="field">
-            <span>Retention period</span>
-            <input name="retention_days" type="number" min="1" max="3650" required value="${retention.retention_days}">
-            <small>Days before Episode deletes managed video, snapshots, embedded images, and visual derivatives.</small>
-          </label>
-          ${retention.policy_state === "unconfirmed" ? '<div class="field-span notice notice-warning"><strong>Confirmation required</strong><span>The active 30-day default has not yet been reviewed by an administrator.</span></div>' : ""}
-          ${retention.policy_state === "disabled" ? '<div class="field-span notice notice-danger"><strong>Automatic deletion is disabled</strong><span>Managed visual Evidence will remain until manually removed.</span></div>' : ""}
-          <div class="field-span configuration-note">${escHtml(retention.notice)}</div>
-          <div class="field-span">
-            <button type="submit" class="button button-primary">Save retention</button>
-          </div>
-        </form>
-      </section>
-      <div class="section"><h3>Core services</h3>${renderIntegrationRows(services, true)}</div>
-      <div class="section"><h3>Integrations (${diagnostics.integrations.length})</h3>${renderIntegrationRows(diagnostics.integrations, true)}</div>`);
+      <div class="system-layout">
+        ${systemNavigation(section)}
+        <div class="system-content">${content}</div>
+      </div>`);
   } catch (error) {
     showError(error.message);
   }

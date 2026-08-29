@@ -16,21 +16,26 @@ import {
   activateCurrentViews,
   deactivateCurrentViews,
   renderCurrentViews,
-} from "./current-views.js?v=2";
+} from "./current-views.js?v=3";
 import {
   episodeDisplayEnd,
   episodeRailTime,
   groupEpisodesByTime,
 } from "./episode-list.js?v=3";
-import { attachMediaSource, evidenceMediaUrl, isHlsEvidence } from "./media-player.js?v=1";
+import {
+  attachMediaSource,
+  evidenceMediaUrl,
+  isHlsEvidence,
+  updateMediaStatus,
+} from "./media-player.js?v=2";
 import {
   originBadge,
   renderEvidenceArchive,
   renderEpisodeEvidence,
   renderEvidenceGrid,
   showCarousel,
-} from "./evidence-gallery.js?v=6";
-import { activateEpisodeWorkspace, renderEpisodeWorkspace } from "./episode-view.js?v=11";
+} from "./evidence-gallery.js?v=7";
+import { activateEpisodeWorkspace, renderEpisodeWorkspace } from "./episode-view.js?v=12";
 import {
   fmt,
   fmtBytes,
@@ -73,6 +78,26 @@ function filterValues(items, field, defaults, selected = "") {
 
 function option(value, label, selected) {
   return `<option value="${escHtml(value)}" ${value === selected ? "selected" : ""}>${escHtml(label)}</option>`;
+}
+
+function incompleteRecordingGuidance(item) {
+  if (item.evidence_type !== "incomplete_recording") return null;
+  const reason = {
+    startup_recovery: "The application restarted before this recording could be finalized.",
+    retry_limit_exceeded: "The camera stream could not be recovered after repeated attempts.",
+    episode_closed: "The Episode closed while the camera stream was reconnecting.",
+    application_shutdown: "The application stopped while this recording was active.",
+    recording_task_cancelled: "The recording task ended before capture was finalized.",
+  }[item.metadata?.reason] || "Capture ended before this recording could be finalized.";
+  const legacy = !isHlsEvidence(item);
+  return {
+    legacy,
+    reason,
+    format: legacy ? "Legacy partial MP4" : "Partial HLS recording",
+    explanation: legacy
+      ? "The incomplete MP4 index was never written, so browsers cannot play this older partial file. The original bytes remain available for forensic recovery, but no action is required."
+      : "Completed HLS fragments were preserved and can be reviewed below. No action is required.",
+  };
 }
 
 function filteredHash(view, filters) {
@@ -606,6 +631,7 @@ export async function evidenceDetail(id) {
     const isImage = item.mime_type?.startsWith("image/");
     const isText = item.mime_type?.startsWith("text/") || item.mime_type === "application/xml";
     const expired = item.availability === "expired";
+    const interruption = incompleteRecordingGuidance(item);
     const associationPromise = (async () => {
       if (!expired && isImage && item.episode_id) {
         try {
@@ -651,7 +677,13 @@ export async function evidenceDetail(id) {
     if (expired) {
       media = `<div class="evidence-detail-file"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
     } else if (isVideo) {
-      media = `<video controls preload="metadata"></video>`;
+      media = `<video controls preload="metadata"></video><div class="media-playback-status hidden" role="status"></div>`;
+    } else if (interruption) {
+      media = `<div class="evidence-detail-file evidence-interrupted-file">
+        <svg><use href="icons.svg?v=2#clock"></use></svg>
+        <strong>Partial recording preserved</strong>
+        <span>This legacy capture is not directly playable.</span>
+      </div>`;
     } else if (isImage) {
       media = `<div class="review-media-image">
         <img src="${API}/evidence/${item.id}/file" alt="Preserved ${escHtml(titleCase(item.evidence_type))}">
@@ -704,11 +736,11 @@ export async function evidenceDetail(id) {
           <div class="review-detail-icon"><svg><use href="icons.svg?v=2#evidence"></use></svg></div>
           <div>
             <div class="eyebrow">Evidence</div>
-            <h2>${escHtml(titleCase(item.evidence_type))}</h2>
+            <h2>${escHtml(interruption ? "Interrupted recording" : titleCase(item.evidence_type))}</h2>
             <code>${escHtml(item.id)}</code>
           </div>
         </div>
-        <div class="review-detail-badges">${originBadge(item)}<span class="badge badge-neutral">${escHtml(item.mime_type || "Unknown format")}</span></div>
+        <div class="review-detail-badges">${originBadge(item)}${interruption ? '<span class="badge badge-degraded">Interrupted</span>' : ""}<span class="badge badge-neutral">${escHtml(interruption?.format || item.mime_type || "Unknown format")}</span></div>
         <div class="review-detail-metrics">
           ${detailMetric("devices", "Device", deviceName)}
           ${detailMetric("areas", "Area", areaName)}
@@ -718,10 +750,14 @@ export async function evidenceDetail(id) {
             : detailMetric("episodes", "Episode", "Not associated")}
         </div>
       </header>
+      ${interruption ? `<section class="recording-interruption-note section">
+        <div><strong>${escHtml(interruption.reason)}</strong><span>${escHtml(interruption.explanation)}</span></div>
+        ${item.episode_id ? `<a href="#episode/${encodeURIComponent(item.episode_id)}">View Episode</a>` : ""}
+      </section>` : ""}
       <section class="review-media-card evidence-detail-media section">
         ${sectionHeading(
           "evidence",
-          expired ? "Expired artifact" : "Preserved artifact",
+          expired ? "Expired artifact" : interruption ? "Preserved partial capture" : "Preserved artifact",
           expired
             ? "Visual Evidence expired under the retention policy"
             : item.original_filename || item.mime_type || "Original filename unavailable",
@@ -731,6 +767,8 @@ export async function evidenceDetail(id) {
         <footer class="review-media-footer">
           <span>${expired
             ? `Expired ${fmt(item.expired_at)}`
+            : interruption
+            ? interruption.legacy ? "Original partial bytes preserved · not directly playable" : "Completed recording fragments preserved"
             : item.sha256
             ? isHlsEvidence(item) ? "Bundle manifest fingerprint recorded" : "SHA-256 fingerprint recorded"
             : "No integrity fingerprint recorded"}</span>
@@ -738,7 +776,7 @@ export async function evidenceDetail(id) {
             ${peerIndex >= 0 && (isImage || isVideo) ? '<button id="evidence-open-viewer" type="button">Open viewer</button>' : ""}
             ${isHlsEvidence(item)
               ? `<a href="${API}/recordings/${item.id}/manifest.json" download>Download component manifest</a>`
-              : `<a href="${API}/evidence/${item.id}/file" download>Download file</a>`}
+              : `<a href="${API}/evidence/${item.id}/file" download>${interruption ? "Download partial data" : "Download file"}</a>`}
           </nav>`}
         </footer>
       </section>
@@ -754,7 +792,12 @@ export async function evidenceDetail(id) {
       </section>`);
     if (!expired && isVideo) {
       const video = document.querySelector(".evidence-detail-media video");
-      if (video) attachMediaSource(video, evidenceMediaUrl(item));
+      if (video) attachMediaSource(video, evidenceMediaUrl(item), {
+        onState: state => updateMediaStatus(
+          document.querySelector(".evidence-detail-media .media-playback-status"),
+          state,
+        ),
+      });
     }
     document.getElementById("evidence-open-viewer")?.addEventListener("click", () => {
       showCarousel(peerMedia, peerIndex);

@@ -9,7 +9,7 @@ from episode import __version__
 from episode.api.routes import create_api
 from episode.api.runtime import OperationalView
 from episode.config import EpisodeConfig
-from episode.domain.models import Area, CapabilityConfig, Device, Episode, Event
+from episode.domain.models import Area, CapabilityConfig, Device, Episode, Event, Evidence
 from episode.storage.repository import Repository
 
 
@@ -227,6 +227,62 @@ async def test_status_is_compact_and_diagnostics_are_separate():
     assert event_api["capabilities"] == ["event-input"]
     assert event_api["summary"] == "2 Events accepted · 1 duplicates"
     assert event_api["details"]["requests_handled"] == 4
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_report_recent_incomplete_recordings_without_private_paths(tmp_path):
+    config = EpisodeConfig(data_dir=str(tmp_path))
+    repository = Repository(config)
+    await repository.initialize()
+    try:
+        await repository.upsert_area(Area(id="front", name="Front"))
+        await repository.upsert_device(
+            Device(id="camera-front", name="Front camera", area_id="front")
+        )
+        await repository.create_episode(Episode(id="episode-one", primary_area_id="front"))
+        private_path = tmp_path / "episodes" / "episode-one" / "recordings" / "partial.bin"
+        private_path.parent.mkdir(parents=True)
+        private_path.write_bytes(b"partial")
+        evidence = Evidence(
+            id="evidence-one",
+            device_id="camera-front",
+            area_id="front",
+            evidence_type="incomplete_recording",
+            file_path=str(private_path),
+            mime_type="application/octet-stream",
+            episode_id="episode-one",
+            metadata={"reason": "retry_limit_exceeded"},
+        )
+        await repository.create_evidence(evidence)
+
+        app = create_api(repository, config.data_dir, operations=_operations())
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/api/v1/diagnostics")
+
+        assert response.status_code == 200
+        assert response.json()["recording_issues"] == [
+            {
+                "evidence_id": "evidence-one",
+                "episode_id": "episode-one",
+                "device_id": "camera-front",
+                "timestamp": evidence.timestamp.isoformat().replace("+00:00", "Z"),
+                "reason": "retry_limit_exceeded",
+            }
+        ]
+        assert str(private_path) not in response.text
+
+        await repository.mark_evidence_expired(
+            evidence,
+            expired_at=evidence.timestamp,
+            artifact_ids=[],
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            expired_response = await client.get("/api/v1/diagnostics")
+        assert expired_response.status_code == 200
+        assert expired_response.json()["recording_issues"] == []
+    finally:
+        await repository.close()
 
 
 @pytest.mark.asyncio

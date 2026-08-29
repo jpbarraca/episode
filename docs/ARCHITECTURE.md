@@ -84,8 +84,11 @@ src/episode/
 ├── actions/          vendor-neutral snapshot action
 ├── domain/           vendor-neutral models and identities
 ├── engine/           correlation and lifecycle orchestration
+├── inventory/        persistent Device/Area configuration service and validation
+├── plugin_api/       versioned public contract for out-of-tree plugins
 ├── recording/        vendor-neutral recording action
 ├── storage/          SQLite, immutable files, provenance, bundle projection
+├── retention.py      visual Evidence lifecycle and expiration tombstones
 ├── api/              public HTTP representation
 └── ui/               static Episode-first web interface
 ```
@@ -318,7 +321,7 @@ receipt, and derives the canonical key without changing the Event representation
 
 ## Integrity and immutability
 
-- Incoming SOAP/XML and completed evidence are SHA-256 hashed.
+- Incoming raw deliveries and completed Evidence are SHA-256 hashed.
 - Write permissions are removed when the filesystem supports it.
 - File moves are collision-safe and never intentionally overwrite evidence.
 - Episode association is committed before files are relocated, making an
@@ -371,7 +374,11 @@ they are not UI contracts.
 
 `/health` remains a minimal liveness response. `/api/v1/status` is the compact,
 frequently-polled summary and deliberately excludes connector discovery data.
-`/api/v1/diagnostics` provides richer normalized detail for the System view.
+`/api/v1/diagnostics` provides richer normalized detail for the System view,
+including a bounded credential-free projection of active recording progress
+and recent persisted incomplete captures. The recorder treats a lack of new HLS
+fragments as a stalled stream after a conservative internal window, restarts
+FFmpeg, and exposes the recovery state without leaking its RTSP URL.
 Device collection responses are compact; Device detail adds safe network,
 policy, media-profile, and integration information without exposing credentials
 or internal configuration structures.
@@ -406,8 +413,10 @@ first-class fields without removing the underlying diagnostic metadata.
 - Broader event-to-action policy is not implemented.
 - Authentication and safe Internet exposure are not implemented.
 - Annotation and processing-run persistence are planned, not yet public APIs.
-- Capture interrupted by an application or host restart is not yet resumed;
-  unpublished `.part` files require operational inspection.
+- Capture resumes after an application or host restart only while the persisted
+  Episode remains active and its recording target can be reconstructed. A
+  restart may still create a capture gap or leave an unfinished fragment; these
+  conditions remain explicit instead of being presented as continuous media.
 
 These are the next boundaries to extract; they are not reasons to expand
 connector-specific logic into the core.

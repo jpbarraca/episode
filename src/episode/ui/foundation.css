@@ -231,6 +231,30 @@ main {
 .badge-manual { background: color-mix(in srgb, var(--info) 20%, transparent); color: var(--info); }
 .badge-system { background: color-mix(in srgb, var(--text-muted) 20%, transparent); color: var(--text-muted); }
 
+.media-playback-status {
+  backdrop-filter: blur(8px);
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  bottom: 1rem;
+  box-shadow: var(--shadow-md);
+  color: var(--text-secondary);
+  font-size: .75rem;
+  left: 50%;
+  max-width: min(90%, 34rem);
+  padding: .55rem .8rem;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  transform: translateX(-50%);
+  z-index: 8;
+}
+.media-playback-status.media-state-error,
+.media-playback-status.media-state-unavailable {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border-strong));
+  color: var(--danger);
+}
+
 /* Connector origin badges */
 .badge-inactive { background: color-mix(in srgb, var(--text-muted) 15%, transparent); color: var(--text-muted); }
 .badge-payload { background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent); }

@@ -17,7 +17,7 @@ function renderPolicyNotice(policy) {
         ? "OpenEpisode-managed visual Evidence will be retained indefinitely unless it is manually removed. Verify your legal and storage requirements."
         : `OpenEpisode is automatically deleting managed visual Evidence after ${policy.retention_days} days using its unconfirmed default.`}</span>
     </div>
-    <a href="#system" class="button button-ghost">${disabled ? "Review policy" : "Review and confirm"}</a>`;
+    <a href="#system/storage" class="button button-ghost">${disabled ? "Review policy" : "Review and confirm"}</a>`;
 }
 
 export async function refreshRetentionPolicy() {

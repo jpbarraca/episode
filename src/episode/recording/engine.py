@@ -48,6 +48,12 @@ class _EpisodeRecording:
     stop_reason: str | None = None
     continued: bool = False
     published: bool = False
+    state: str = "starting"
+    fragment_count: int = 0
+    last_fragment_at: datetime | None = None
+    reconnect_count: int = 0
+    last_exit_code: int | None = None
+    last_error: str | None = None
 
     @property
     def evidence_id(self) -> str:
@@ -90,6 +96,14 @@ class RecordingEngine:
         self._recordings: dict[tuple[str, str], _EpisodeRecording] = {}
         self._recoverable: dict[tuple[str, str], _EpisodeRecording] = {}
         self._running = False
+        self._stall_seconds = max(60, fragment_seconds * 6)
+        self._completed_count = 0
+        self._incomplete_count = 0
+        self._reconnect_count = 0
+        self._failure_count = 0
+        self._stalled_count = 0
+        self._last_completed_at: datetime | None = None
+        self._last_error: str | None = None
 
     @staticmethod
     def _rec_key(episode_id: str, device_id: str) -> tuple[str, str]:
@@ -111,15 +125,42 @@ class RecordingEngine:
 
     def active_recordings(self, episode_id: str) -> tuple[dict[str, object], ...]:
         return tuple(
-            {
-                "evidence_id": recording.evidence_id,
-                "device_id": recording.device_id,
-                "started_at": recording.start_time,
-                "ready": recording.bundle.playlist_path.exists(),
-            }
+            self._recording_diagnostic(recording)
             for recording in self._recordings.values()
             if recording.episode_id == episode_id
         )
+
+    def _observe_progress(self, recording: _EpisodeRecording) -> bool:
+        fragment_count = recording.bundle.next_segment_index()
+        if fragment_count <= recording.fragment_count:
+            return False
+        recording.fragment_count = fragment_count
+        fragments = list((recording.bundle.root / "segments").glob("segment-*.m4s"))
+        if fragments:
+            latest = max(fragments, key=lambda path: path.stat().st_mtime_ns)
+            recording.last_fragment_at = datetime.fromtimestamp(
+                latest.stat().st_mtime,
+                tz=timezone.utc,
+            )
+        recording.state = "recording"
+        recording.last_error = None
+        return True
+
+    def _recording_diagnostic(self, recording: _EpisodeRecording) -> dict[str, object]:
+        self._observe_progress(recording)
+        return {
+            "evidence_id": recording.evidence_id,
+            "episode_id": recording.episode_id,
+            "device_id": recording.device_id,
+            "started_at": recording.start_time,
+            "state": recording.state,
+            "ready": recording.bundle.playlist_path.exists(),
+            "fragment_count": recording.fragment_count,
+            "last_fragment_at": recording.last_fragment_at,
+            "reconnect_count": recording.reconnect_count,
+            "last_exit_code": recording.last_exit_code,
+            "last_error": recording.last_error,
+        }
 
     def active_bundle(self, evidence_id: str) -> HLSRecordingBundle | None:
         return next(
@@ -308,6 +349,9 @@ class RecordingEngine:
                 start_time=started_at,
             )
         rec.rtsp_url = rtsp_url
+        self._observe_progress(rec)
+        if rec.continued:
+            rec.state = "reconnecting"
         self._recordings[key] = rec
         rec.task = asyncio.create_task(self._record_episode(rec, rtsp_url))
         self._active_tasks.add(rec.task)
@@ -420,11 +464,15 @@ class RecordingEngine:
             await self._finalize_bundle(rec)
             return
         segments_before = rec.bundle.next_segment_index()
+        observed_segments = segments_before
+        last_progress = asyncio.get_running_loop().time()
+        rec.state = "reconnecting" if rec.continued or _retries else "starting"
         flags = "independent_segments+program_date_time+temp_file+append_list"
         if rec.continued or _retries:
             flags += "+discont_start"
         returncode = -1
         wait_task: asyncio.Task | None = None
+        stall_signaled = False
         try:
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg",
@@ -473,6 +521,29 @@ class RecordingEngine:
             while not wait_task.done():
                 await asyncio.wait({wait_task}, timeout=1)
                 await asyncio.to_thread(rec.bundle.refresh_manifest, state="recording")
+                current_segments = rec.bundle.next_segment_index()
+                if current_segments > observed_segments:
+                    observed_segments = current_segments
+                    last_progress = asyncio.get_running_loop().time()
+                    self._observe_progress(rec)
+                elif (
+                    not wait_task.done()
+                    and not stall_signaled
+                    and asyncio.get_running_loop().time() - last_progress > self._stall_seconds
+                ):
+                    stall_signaled = True
+                    rec.state = "stalled"
+                    rec.last_error = (
+                        f"No new media fragment for more than {self._stall_seconds} seconds"
+                    )
+                    self._stalled_count += 1
+                    self._last_error = rec.last_error
+                    logger.warning(
+                        "Recording stalled for episode %s camera %s; restarting FFmpeg",
+                        rec.episode_id[:8],
+                        rec.device_id,
+                    )
+                    self._signal_process(rec)
             returncode = await wait_task
         except asyncio.CancelledError:
             await self._terminate_process(rec)
@@ -509,8 +580,19 @@ class RecordingEngine:
 
         segments_after = rec.bundle.next_segment_index()
         retry = 0 if segments_after > segments_before else _retries + 1
+        rec.last_exit_code = returncode
+        rec.reconnect_count += 1
+        self._reconnect_count += 1
         if retry > 3:
             self._recordings.pop(key, None)
+            rec.state = "failed"
+            rec.last_error = (
+                "Recording stalled repeatedly; retry limit exceeded"
+                if stall_signaled
+                else f"FFmpeg exited with code {returncode}; retry limit exceeded"
+            )
+            self._failure_count += 1
+            self._last_error = rec.last_error
             await self._finalize_bundle(rec, incomplete=True, reason="retry_limit_exceeded")
             logger.error(
                 "Recording failed for episode %s camera %s after 3 retries",
@@ -518,6 +600,10 @@ class RecordingEngine:
                 rec.device_id,
             )
             return
+        rec.state = "reconnecting"
+        if not stall_signaled:
+            rec.last_error = f"FFmpeg exited with code {returncode}; reconnecting"
+        self._last_error = rec.last_error
         logger.warning(
             "Recording process ended for episode %s camera %s "
             "(ffmpeg exit %s), reconnecting (%d/3)",
@@ -528,6 +614,11 @@ class RecordingEngine:
         )
         await asyncio.sleep(2)
         if self._recordings.get(key) is not rec:
+            if rec.stop_reason == "application_shutdown" or not self._running:
+                rec.bundle.preserve_temporary_components()
+                rec.bundle.refresh_manifest(state="interrupted", reason="application_shutdown")
+            else:
+                await self._finalize_bundle(rec)
             return
         episode = await self._repo.get_episode(rec.episode_id)
         if not episode or episode.state == EpisodeState.CLOSED:
@@ -602,6 +693,11 @@ class RecordingEngine:
             )
         rec.published = True
         rec.bundle.complete_publication()
+        if evidence_type == "recording":
+            self._completed_count += 1
+        else:
+            self._incomplete_count += 1
+        self._last_completed_at = ended_at
         await self._repo.append_episode_journal(
             rec.episode_id,
             ("recording.completed" if evidence_type == "recording" else "recording.incomplete"),
@@ -739,10 +835,30 @@ class RecordingEngine:
             return False
 
     def status(self) -> dict:
+        recordings = tuple(
+            self._recording_diagnostic(recording)
+            for recording in sorted(
+                self._recordings.values(),
+                key=lambda item: (item.start_time, item.device_id),
+            )
+        )
+        degraded = any(
+            item["state"] in {"stalled", "reconnecting", "failed"} for item in recordings
+        )
         return {
             "running": self._running,
+            "state": "unavailable" if not self._running else "degraded" if degraded else "healthy",
             "active_recordings": len(self._recordings),
             "cameras": len({key[1] for key in self._recordings}),
             "format": "hls-fmp4",
             "fragment_seconds": self._fragment_seconds,
+            "stall_seconds": self._stall_seconds,
+            "completed_recordings": self._completed_count,
+            "incomplete_recordings": self._incomplete_count,
+            "reconnects": self._reconnect_count,
+            "failures": self._failure_count,
+            "stalled_recordings": self._stalled_count,
+            "last_completed_at": self._last_completed_at,
+            "last_error": self._last_error,
+            "recordings": recordings[:32],
         }

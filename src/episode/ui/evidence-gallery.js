@@ -1,7 +1,12 @@
 import { API, api } from "./api.js?v=3";
 import { $, escHtml } from "./dom.js";
 import { fmtBytes, fmtShort, fmtTime, plural, titleCase, trunc } from "./format.js?v=3";
-import { attachMediaSource, evidenceMediaUrl, isHlsEvidence } from "./media-player.js?v=1";
+import {
+  attachMediaSource,
+  evidenceMediaUrl,
+  isHlsEvidence,
+  updateMediaStatus,
+} from "./media-player.js?v=2";
 
 let carouselItems = [];
 let carouselIndex = 0;
@@ -201,7 +206,7 @@ function renderCarousel() {
   if (isExpired) {
     mediaHtml = `<div class="carousel-file-preview"><svg><use href="icons.svg?v=2#clock"></use></svg><strong>Expired</strong><span>Visual Evidence expired under the retention policy.</span></div>`;
   } else if (isVideo) {
-    mediaHtml = `<video controls autoplay></video>`;
+    mediaHtml = `<video controls autoplay></video><div class="media-playback-status hidden" role="status"></div>`;
   } else if (isImage) {
     mediaHtml = `<div class="carousel-image-frame">
       <img src="${API}/evidence/${evidence.id}/file" alt="">
@@ -220,6 +225,12 @@ function renderCarousel() {
     carouselDetach = attachMediaSource(
       $("#carousel-slide").querySelector("video"),
       evidenceMediaUrl(evidence),
+      {
+        onState: state => updateMediaStatus(
+          $("#carousel-slide").querySelector(".media-playback-status"),
+          state,
+        ),
+      },
     );
   }
   $("#carousel-title").textContent = titleCase(evidence.evidence_type);

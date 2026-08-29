@@ -7,7 +7,11 @@ import {
   detectionForMoment,
   eventTitle,
 } from "./timeline.js?v=5";
-import { attachMediaSource, evidenceMediaUrl } from "./media-player.js?v=1";
+import {
+  attachMediaSource,
+  evidenceMediaUrl,
+  updateMediaStatus,
+} from "./media-player.js?v=2";
 
 function secondsLabel(milliseconds) {
   const seconds = Math.max(0, Math.round(milliseconds / 1000));
@@ -262,6 +266,7 @@ export function activateEpisodeWorkspace(model, episode, deviceNames = new Map()
     stage.innerHTML = `<div class="episode-video-stage">
       <video id="episode-recording-player"
         controls preload="metadata"></video>
+      <div class="media-playback-status hidden" role="status"></div>
       <svg id="episode-video-overlay" viewBox="0 0 1 1" preserveAspectRatio="none"
           aria-label="Detection region">
         <rect></rect>
@@ -272,7 +277,10 @@ export function activateEpisodeWorkspace(model, episode, deviceNames = new Map()
     playhead.textContent = fmtTime(targetTime || recording.bounds.start);
     setActiveMedia(recording.id);
     const player = $("#episode-recording-player");
-    const detachSource = attachMediaSource(player, evidenceMediaUrl(recording));
+    const playbackStatus = stage.querySelector(".media-playback-status");
+    const detachSource = attachMediaSource(player, evidenceMediaUrl(recording), {
+      onState: state => updateMediaStatus(playbackStatus, state),
+    });
     const videoStage = stage.querySelector(".episode-video-stage");
     const overlay = $("#episode-video-overlay");
     const overlayBox = overlay.querySelector("rect");

@@ -94,25 +94,34 @@ Evidence resources expose `availability`, `expired_at`, and
 `expiration_reason`. Retention-expired Evidence remains as a tombstone in JSON
 and Episode manifests, while its file and thumbnail endpoints return `410`.
 
-`GET /settings/retention` returns the global visual Evidence policy, confirmation
-state, and cleanup status. A new installation reports an active 30-day policy
-with `policy_state: "unconfirmed"`. `PUT /settings/retention` accepts `enabled`
-and `retention_days` from 1 through 3650; any successful update records explicit
-administrator confirmation. Updating an enabled policy immediately runs one
-cleanup pass. A disabled policy does not delete Evidence and reports
-`policy_state: "disabled"` so clients can keep the condition visible.
+`GET /api/v1/settings/retention` returns the global visual Evidence policy,
+confirmation state, and cleanup status. A new installation reports an active
+30-day policy with `policy_state: "unconfirmed"`.
+`PUT /api/v1/settings/retention` accepts `enabled` and `retention_days` from 1
+through 3650; any successful update records explicit administrator confirmation.
+Updating an enabled policy immediately runs one cleanup pass. A disabled policy
+does not delete Evidence and reports `policy_state: "disabled"` so clients can
+keep the condition visible.
 
-Active Episodes expose `/episodes/{episode_id}/current-views` as a small
+Active Episodes expose `/api/v1/episodes/{episode_id}/current-views` as a small
 operational projection of Devices currently recording that Episode. Once the
 first recording fragment is ready, `mode: "hls"` provides a local
 `stream_url`; before then, a registered snapshot provider may supply
 `mode: "snapshot"`. Neither response exposes Device credentials. Devices
 without a ready stream or snapshot provider remain in the collection with
 `mode: "unavailable"` so preview support is never confused with recording
-health.
+health. `recording_state`, `fragment_count`, and `last_fragment_at` explain
+whether capture is starting, progressing, reconnecting, or recovering without
+revealing the upstream stream URL.
+
+`GET /api/v1/diagnostics` includes a bounded active `recordings` collection and
+up to ten persisted `recording_issues`. Active entries report fragment progress,
+reconnect count, and safe exit information. Recent issues identify incomplete
+recording Evidence across application restarts. The compact `/api/v1/status`
+endpoint continues to expose only aggregate health and active-recording count.
 
 HLS recording playlists and components are served from
-`/recordings/{evidence_id}/{component_path}`. Active playlists are never
+`/api/v1/recordings/{evidence_id}/{component_path}`. Active playlists are never
 cached; finalized media fragments are immutable and may be cached. The route
 only exposes the known playlist, initialization file, component manifest, and
 media-fragment paths within the exact recording bundle. Legacy MP4 Evidence

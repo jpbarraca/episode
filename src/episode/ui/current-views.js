@@ -1,6 +1,6 @@
 import { api } from "./api.js?v=3";
 import { escHtml } from "./dom.js";
-import { attachMediaSource } from "./media-player.js?v=1";
+import { attachMediaSource } from "./media-player.js?v=2";
 
 let refreshTimer = null;
 let refreshGeneration = 0;
@@ -49,21 +49,27 @@ export function renderCurrentViews(views) {
 }
 
 function signature(views) {
-  return views.map(view => `${view.device_id}:${view.mode}:${view.stream_url || ""}`).join("|");
+  return views.map(view => (
+    `${view.device_id}:${view.mode}:${view.recording_state || ""}:${view.stream_url || ""}`
+  )).join("|");
 }
 
 function attachStreams() {
   streamDetachers.forEach(detach => detach());
   streamDetachers = [];
   document.querySelectorAll("#current-view-grid video[data-stream-url]").forEach(video => {
-    video.addEventListener("playing", () => {
-      video.closest(".current-view-card")?.classList.remove("is-loading", "has-error");
-    });
-    video.addEventListener("error", () => {
-      video.closest(".current-view-card")?.classList.add("has-error");
-    });
     streamDetachers.push(
-      attachMediaSource(video, video.dataset.streamUrl, { live: true }),
+      attachMediaSource(video, video.dataset.streamUrl, {
+        live: true,
+        onState: ({ state, message }) => {
+          const card = video.closest(".current-view-card");
+          card?.classList.toggle("has-error", ["error", "unavailable"].includes(state));
+          card?.classList.toggle("is-loading", ["loading", "buffering", "reconnecting"].includes(state));
+          const status = card?.querySelector(".current-view-status");
+          if (status && state !== "ready") status.textContent = message;
+          if (status && state === "ready") status.textContent = "Streaming the recording as it is captured";
+        },
+      }),
     );
   });
 }

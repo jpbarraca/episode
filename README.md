@@ -33,7 +33,7 @@ self-hosters who want local, portable evidence.
 - Optionally enriches observations with Hikvision ISAPI and Alarm Server events.
 - Preserves camera-created files through a generic FTP transport, then lets the
   configured Hikvision plugin interpret supported snapshot filenames.
-- Preserves and checksums raw XML, snapshots, and recordings locally.
+- Preserves and checksums raw deliveries, snapshots, and recordings locally.
 - Records every ingress delivery and deduplicates matching observations.
 - Accepts normalized Events from trusted local automations through an optional
   raw-first HTTP Event API.
@@ -199,6 +199,9 @@ sandboxed.
   `EPISODE_HTTP_BIND=0.0.0.0` and keep the host on a trusted network.
 - Use `docker compose --env-file .env logs -f episode` to inspect integration and
   recording errors.
+- Use **System → Recordings** to see active fragment progress,
+  reconnecting streams, and recent incomplete captures. These diagnostics never
+  expose camera stream URLs or credentials.
 - Use **System → Download diagnostics** to attach a sanitized runtime report to
   an issue without exposing stored credentials or private data paths.
 
@@ -212,14 +215,15 @@ event payloads, snapshots, recordings, an atomic `manifest.json`, and an
 append-only `journal.ndjson`. The folder remains understandable if the SQLite
 index is unavailable. Keep this directory backed up or synchronized separately.
 
-Completed Evidence is immutable and indexed by checksum. A `.part` recording is
-working state until FFmpeg closes it. Interrupted working files are reconciled
-on startup and remain visible as completed or incomplete Evidence rather than
-being silently abandoned.
+Completed Evidence is immutable and indexed by checksum. An active HLS bundle is
+working state until it is finalized and published as one Evidence item.
+Interrupted bundles are reconciled on startup and are resumed, finalized, or
+shown as incomplete Evidence rather than being silently abandoned. Legacy
+`.mp4.part` captures follow a separate compatibility recovery path.
 
 Episode automatically deletes managed visual Evidence after 30 days by default.
 First-run setup requires an administrator to confirm that policy or explicitly
-choose another period under **System → Storage and retention**. Disabling
+choose another period under **System → Storage**. Disabling
 automatic deletion requires confirmation and leaves a persistent warning in the
 UI. Cleanup runs at startup and hourly, removes original and derived visual files
 together, and leaves an integrity-bearing expiration tombstone in the Episode.
@@ -240,7 +244,7 @@ inventory—are ignored by Git and must never be committed.
 
 ## Project status
 
-Episode `0.1.0-beta.4` is a working ONVIF-first public beta for technical
+Episode `0.1.0-beta.5` is a working ONVIF-first public beta for technical
 self-hosters using IP cameras and Docker. Hikvision integrations provide
 optional enrichment. The current priorities are reliable preservation, correct
 correlation, simple installation, and an uncluttered Episode-first interface.
@@ -265,6 +269,7 @@ artwork, light and dark organization avatars, and GitHub social previews.
 
 ## Documentation
 
+- [Implementation guide for coding agents](AGENTS.md)
 - [Architecture and domain model](docs/ARCHITECTURE.md)
 - [REST API v1 conventions](docs/API.md)
 - [Generic Event API](docs/EVENT_API.md)

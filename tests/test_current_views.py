@@ -103,6 +103,9 @@ async def test_active_episode_current_view_api_never_exposes_media_credentials(t
                     "refresh_interval_seconds": 3,
                     "image_url": "/api/v1/episodes/episode-a/current-views/camera-a",
                     "stream_url": None,
+                    "recording_state": None,
+                    "fragment_count": 0,
+                    "last_fragment_at": None,
                     "summary": "Refreshing while this Device records",
                 },
                 {
@@ -112,6 +115,9 @@ async def test_active_episode_current_view_api_never_exposes_media_credentials(t
                     "refresh_interval_seconds": 3,
                     "image_url": None,
                     "stream_url": None,
+                    "recording_state": None,
+                    "fragment_count": 0,
+                    "last_fragment_at": None,
                     "summary": "Recording continues without a preview provider",
                 },
             ]
@@ -152,6 +158,8 @@ async def test_ready_recording_stream_replaces_snapshot_current_view(tmp_path):
         assert response.json()[0]["stream_url"] == (
             "/api/v1/recordings/evidence-camera-a/index.m3u8"
         )
+        assert response.json()[0]["recording_state"] == "recording"
+        assert response.json()[0]["fragment_count"] == 0
         assert "camera/" not in response.text
     finally:
         await repository.close()

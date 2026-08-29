@@ -92,7 +92,7 @@ export async function welcome() {
             retentionConfirmed ? "complete" : "active",
             retentionConfirmed
               ? ""
-              : `<div class="onboarding-actions"><button class="button button-primary" type="button" onclick="confirmDefaultRetention(${retention.retention_days})">Confirm ${retention.retention_days} days</button><a href="#system" class="button button-ghost">Review options</a></div>`,
+              : `<div class="onboarding-actions"><button class="button button-primary" type="button" onclick="confirmDefaultRetention(${retention.retention_days})">Confirm ${retention.retention_days} days</button><a href="#system/storage" class="button button-ghost">Review options</a></div>`,
           )}
           ${step(
             4,

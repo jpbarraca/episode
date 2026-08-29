@@ -63,10 +63,17 @@ def episodes_router(context: ApiContext) -> APIRouter:
         for view in context.current_views.describe(episode_id):
             device = await repo.get_device(view.device_id)
             recording = active_recordings.get(view.device_id)
-            if recording and not recording.get("ready"):
-                recording = None
-            mode = "hls" if recording else view.mode
+            stream_ready = bool(recording and recording.get("ready"))
+            mode = "hls" if stream_ready else view.mode
             available = mode == "snapshot"
+            recording_state = str(recording.get("state") or "recording") if recording else None
+            recording_summary = {
+                "starting": "Recording is starting",
+                "recording": "Streaming the recording as it is captured",
+                "reconnecting": "Camera stream reconnecting · captured media is preserved",
+                "stalled": "Camera stream stalled · automatic recovery in progress",
+                "failed": "Recording stopped after repeated stream failures",
+            }.get(recording_state or "")
             result.append(
                 {
                     "device_id": view.device_id,
@@ -80,12 +87,15 @@ def episodes_router(context: ApiContext) -> APIRouter:
                     ),
                     "stream_url": (
                         f"/api/v1/recordings/{recording['evidence_id']}/index.m3u8"
-                        if recording
+                        if stream_ready
                         else None
                     ),
+                    "recording_state": recording_state,
+                    "fragment_count": int(recording.get("fragment_count", 0)) if recording else 0,
+                    "last_fragment_at": recording.get("last_fragment_at") if recording else None,
                     "summary": (
-                        "Streaming the recording as it is captured"
-                        if recording
+                        recording_summary
+                        if recording_summary
                         else "Refreshing while this Device records"
                         if available
                         else "Recording continues without a preview provider"

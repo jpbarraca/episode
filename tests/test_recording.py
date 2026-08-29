@@ -19,6 +19,7 @@ from episode.domain.models import (
     EpisodeState,
     Event,
     EventState,
+    Evidence,
 )
 from episode.engine.bus import EventBus, Message
 from episode.engine.engine import EpisodeEngine
@@ -431,6 +432,118 @@ async def test_hls_fragments_remain_one_evidence_bundle(repo, bus, config):
     release.set()
     await recording.task
     await recorder.stop()
+
+
+@pytest.mark.asyncio
+async def test_recorder_diagnostics_report_progress_without_stream_credentials(repo, bus, config):
+    await repo.initialize()
+    recorder = RecordingEngine(repo, bus, config.data_dir)
+    release = asyncio.Event()
+
+    async def hold_recording(recording, rtsp_url):
+        await release.wait()
+
+    recorder._record_episode = hold_recording
+    await recorder.start()
+    await recorder._start_recording(
+        "episode-1",
+        _video_device("camera-x", "area-1", "on_episode"),
+        "rtsp://private-user:private-password@camera-x/stream",
+    )
+    recording = recorder._recordings[("episode-1", "camera-x")]
+    (recording.bundle.root / "segments" / "segment-000000.m4s").write_bytes(b"fragment")
+    recording.bundle.playlist_path.write_text(
+        "#EXTM3U\n#EXTINF:4.0,\nsegments/segment-000000.m4s\n",
+        encoding="utf-8",
+    )
+
+    status = recorder.status()
+    diagnostic = status["recordings"][0]
+    assert status["state"] == "healthy"
+    assert diagnostic["state"] == "recording"
+    assert diagnostic["fragment_count"] == 1
+    assert diagnostic["last_fragment_at"] is not None
+    assert "rtsp" not in str(diagnostic)
+    assert "private-password" not in str(status)
+
+    recording.state = "reconnecting"
+    recording.last_error = "FFmpeg exited with code 1; reconnecting"
+    status = recorder.status()
+    assert status["state"] == "degraded"
+    assert status["recordings"][0]["last_error"] == recording.last_error
+
+    release.set()
+    await recording.task
+    await recorder.stop()
+    await repo.close()
+
+
+@pytest.mark.asyncio
+async def test_stalled_stream_reconnect_gap_still_finalizes_on_episode_close(
+    repo, bus, config, monkeypatch
+):
+    await repo.initialize()
+    await _add_areas(repo, "area-1")
+    device = _video_device("camera-x", "area-1", "on_episode")
+    await repo.upsert_device(device)
+    await repo.create_episode(
+        Episode(id="episode-1", primary_area_id="area-1", state=EpisodeState.ACTIVE)
+    )
+    recorder = RecordingEngine(repo, bus, config.data_dir)
+    recorder._stall_seconds = 0.01
+    terminated = asyncio.Event()
+
+    class StalledProcess:
+        def __init__(self):
+            self.returncode = None
+
+        def terminate(self):
+            self.returncode = -15
+            terminated.set()
+
+        def kill(self):
+            self.returncode = -9
+            terminated.set()
+
+        async def wait(self):
+            await terminated.wait()
+            return self.returncode
+
+    async def start_ffmpeg(*args, **kwargs):
+        return StalledProcess()
+
+    async def persist_evidence(message):
+        await repo.create_evidence(Evidence(**message.data["evidence"]))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", start_ffmpeg)
+    bus.subscribe("evidence.received", persist_evidence)
+    await recorder.start()
+    await recorder._start_recording(
+        "episode-1",
+        device,
+        "rtsp://camera-x/stream",
+    )
+    recording = recorder._recordings[("episode-1", "camera-x")]
+
+    await asyncio.wait_for(terminated.wait(), timeout=2)
+    for _attempt in range(50):
+        if recorder.status()["reconnects"]:
+            break
+        await asyncio.sleep(0.01)
+
+    status = recorder.status()
+    assert status["stalled_recordings"] == 1
+    assert status["reconnects"] == 1
+    assert status["state"] == "degraded"
+
+    await recorder._stop_recording(recording)
+    evidence = await repo.get_evidence(recording.evidence_id)
+    assert evidence is not None
+    assert evidence.evidence_type == "incomplete_recording"
+    assert not recording.bundle.capture_state_path.exists()
+
+    await recorder.stop()
+    await repo.close()
 
 
 @pytest.mark.asyncio

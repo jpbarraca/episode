@@ -8,6 +8,10 @@ The primary goal at this stage is to harden the Episode model and turn the
 working beta into a dependable, understandable product rather than expand the
 feature set indiscriminately.
 
+Coding agents and automated contributors must also follow the project-level
+[`AGENTS.md`](../AGENTS.md) implementation guide. Human contributors may find it
+useful as a concise statement of the invariants a change must preserve.
+
 ## Guiding Principles
 
 When contributing, please keep the following principles in mind:

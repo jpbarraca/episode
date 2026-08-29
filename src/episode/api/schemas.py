@@ -118,6 +118,28 @@ class StorageResponse(ApiModel):
     filesystem_free_bytes: int | None = None
 
 
+class RecordingDiagnosticResponse(ApiModel):
+    evidence_id: str
+    episode_id: str
+    device_id: str
+    started_at: datetime
+    state: Literal["starting", "recording", "reconnecting", "stalled", "failed"]
+    ready: bool = False
+    fragment_count: int = 0
+    last_fragment_at: datetime | None = None
+    reconnect_count: int = 0
+    last_exit_code: int | None = None
+    last_error: str | None = None
+
+
+class RecordingIssueResponse(ApiModel):
+    evidence_id: str
+    episode_id: str | None = None
+    device_id: str
+    timestamp: datetime
+    reason: str | None = None
+
+
 class RetentionSettingsUpdate(ApiModel):
     enabled: bool
     retention_days: int = Field(ge=1, le=3650)
@@ -142,6 +164,8 @@ class DiagnosticsResponse(ApiModel):
     integrations: list[IntegrationResponse]
     storage: StorageResponse = Field(default_factory=StorageResponse)
     retention: dict[str, Any] = Field(default_factory=dict)
+    recordings: list[RecordingDiagnosticResponse] = Field(default_factory=list)
+    recording_issues: list[RecordingIssueResponse] = Field(default_factory=list)
 
 
 class DiagnosticsExportResponse(ApiModel):
@@ -172,6 +196,9 @@ class CurrentViewResponse(ApiModel):
     refresh_interval_seconds: int
     image_url: str | None = None
     stream_url: str | None = None
+    recording_state: str | None = None
+    fragment_count: int = 0
+    last_fragment_at: datetime | None = None
     summary: str
 
 

@@ -15,7 +15,7 @@ const currentViewsUrl = moduleUrl(
   source
     .replace('"./api.js?v=3"', JSON.stringify(apiUrl))
     .replace('"./dom.js"', JSON.stringify(domUrl))
-    .replace('"./media-player.js?v=1"', JSON.stringify(mediaUrl)),
+    .replace('"./media-player.js?v=2"', JSON.stringify(mediaUrl)),
 );
 const { renderCurrentViews } = await import(currentViewsUrl);
 

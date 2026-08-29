@@ -144,7 +144,12 @@ class OperationalView:
         retention = dict(self._retention_status()) if self._retention_status else {}
         service_states: dict[str, OperationalState] = {
             "engine": "healthy" if engine.get("running") else "unavailable",
-            "recorder": "healthy" if recorder.get("running") else "unavailable",
+            "recorder": str(
+                recorder.get(
+                    "state",
+                    "healthy" if recorder.get("running") else "unavailable",
+                )
+            ),
             "snapshots": (
                 "disabled"
                 if not self._snapshots_enabled
@@ -164,6 +169,8 @@ class OperationalView:
         }
         if any(service_states[name] == "unavailable" for name in ("engine", "recorder")):
             state: OperationalState = "unavailable"
+        elif service_states["recorder"] == "degraded":
+            state = "degraded"
         elif retention and service_states["retention"] == "degraded":
             state = "degraded"
         elif counts["degraded"] or counts["unavailable"]:
@@ -198,9 +205,21 @@ class OperationalView:
                 "state": status["services"]["recorder"],
                 "summary": f"{int(recorder.get('active_recordings', 0))} active recordings",
                 "metrics": {
-                    "active_recordings": int(recorder.get("active_recordings", 0)),
-                    "cameras": int(recorder.get("cameras", 0)),
-                    "fragment_seconds": int(recorder.get("fragment_seconds", 0)),
+                    key: recorder.get(key)
+                    for key in (
+                        "active_recordings",
+                        "cameras",
+                        "fragment_seconds",
+                        "stall_seconds",
+                        "completed_recordings",
+                        "incomplete_recordings",
+                        "reconnects",
+                        "failures",
+                        "stalled_recordings",
+                        "last_completed_at",
+                        "last_error",
+                    )
+                    if recorder.get(key) is not None
                 },
             },
             {
@@ -246,6 +265,7 @@ class OperationalView:
             "status": status,
             "services": services,
             "integrations": self.integrations(detailed=True),
+            "recordings": list(recorder.get("recordings") or []),
         }
 
     def device_summary(self, device: Device) -> dict[str, Any]:
