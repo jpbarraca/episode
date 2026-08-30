@@ -233,6 +233,19 @@ class ReolinkDeviceConnection:
             "Reolink:%s discovering stream URL",
             self.config.device.name,
         )
+        # Probe snapshot support first (best-effort) so it is known before
+        # _apply_discovery persists device capabilities, ensuring the
+        # "snapshots" capability is not lost (mirrors validation).
+        try:
+            snapshot = await self._client.get_snapshot(channel=0)
+            self._snapshot_supported = bool(snapshot and snapshot[:2] == b"\xff\xd8")
+        except Exception as error:
+            logger.debug(
+                "Reolink:%s snapshot probe failed: %s",
+                self.config.device.name,
+                error,
+            )
+
         try:
             self._stream_url = await self._client.get_stream_url(channel=0)
             if self._stream_url and self._stream_url.success:
@@ -251,18 +264,6 @@ class ReolinkDeviceConnection:
                 error,
             )
             self._set_error(error)
-
-        # Probe snapshot support once (best-effort) so runtime status reports
-        # the "snapshots" capability, mirroring validation.
-        try:
-            snapshot = await self._client.get_snapshot(channel=0)
-            self._snapshot_supported = bool(snapshot and snapshot[:2] == b"\xff\xd8")
-        except Exception as error:
-            logger.debug(
-                "Reolink:%s snapshot probe failed: %s",
-                self.config.device.name,
-                error,
-            )
 
         # Register media endpoints (streams + snapshots) when enabled, so
         # recording and snapshot-on-event work for Reolink-only devices.
@@ -409,6 +410,14 @@ class ReolinkDeviceConnection:
                     )
                     await self._authenticate()
 
+                # Keepalive ping (cmdId=93): some firmwares idle out an
+                # otherwise-quiet authenticated session, which would silently
+                # end the event subscription. Ping every loop so the session
+                # stays alive regardless of event subscription state.
+                if not await self._client.ping():
+                    await self._client.close()
+                    raise ReolinkError("Keepalive failed; reconnecting")
+
                 if not self.config.events_enabled:
                     # No events to process, just keepalive
                     await asyncio.sleep(self.config.retry_delay)
@@ -423,14 +432,6 @@ class ReolinkDeviceConnection:
                     await self._discover_stream()
 
                 backoff = 5.0
-
-                # Keepalive ping (cmdId=93): some firmwares idle out an
-                # otherwise-quiet authenticated session, which would silently
-                # end the event subscription. Ping each loop so the session
-                # (and the cmdId=31 subscription) stays alive.
-                if not await self._client.ping():
-                    await self._client.close()
-                    raise ReolinkError("Keepalive failed; reconnecting")
 
                 # Capabilities are static per camera and already applied during
                 # startup discovery (_apply_discovery); no periodic refresh or

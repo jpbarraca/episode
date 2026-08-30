@@ -258,8 +258,8 @@ class FakeFrameReader:
         self._frames = frames
 
     async def iter_frames(self):
-        for cmd_id, resp_code, payload_offset, body in self._frames:
-            yield cmd_id, resp_code, payload_offset, body
+        for cmd_id, msg_num, resp_code, payload_offset, body in self._frames:
+            yield cmd_id, msg_num, resp_code, payload_offset, body
 
 
 @pytest.mark.asyncio
@@ -269,8 +269,8 @@ async def test_dispatcher_routes_response_and_events_without_dropping():
     # would have been discarded by the command's response reader.
     reader = FakeFrameReader(
         [
-            (146, 0, 0, b"<StreamInfoList/>"),  # response to get_stream_url
-            (33, 0, 0, b"<AlarmEventList/>"),  # alarm push during response window
+            (146, 1, 0, 0, b"<StreamInfoList/>"),  # response to get_stream_url
+            (33, 0, 0, 0, b"<AlarmEventList/>"),  # alarm push during response window
         ]
     )
     dispatcher = BaichuanFrameDispatcher(reader)

@@ -55,7 +55,6 @@ BC_CMD_ID_SNAPSHOT = 109
 BC_CMD_ID_STREAM_INFO_LIST = 146
 BC_CMD_ID_BATTERY_STATUS = 252
 BC_CMD_ID_PING = 93
-BC_CMD_ID_GET_SNAPSHOT = 109
 # Subscribe to push events: Reolink cameras only push alarm-event frames
 # (cmdId=33) to an authenticated client that first subscribes via cmdId=31.
 BC_CMD_ID_SUBSCRIBE_EVENTS = 31
@@ -412,8 +411,14 @@ class BaichuanFrameReader:
             return None
         return start + total
 
-    async def _iter_frames(self) -> AsyncIterator[tuple[int, int, bytes]]:
-        """Yield (cmd_id, response_code, body) tuples as frames arrive.
+    async def _iter_frames(self) -> AsyncIterator[tuple[int, int, int, int, bytes]]:
+        """Yield ``(cmd_id, msg_num, response_code, payload_offset, body)`` as
+        frames arrive.
+
+        The ``msg_num`` is read from the frame header so request/response
+        waiters can correlate a response to the exact command that produced it
+        (concurrent commands sharing a ``cmd_id`` would otherwise be
+        indistinguishable).
 
         NOTE: the consumed bytes are removed from ``self._buffer`` *before* the
         ``yield`` so a suspended generator never sees stale frame bytes at the
@@ -445,6 +450,7 @@ class BaichuanFrameReader:
                 resp_code = _struct.unpack_from("<H", frame_data, 16)[0]
                 body_len = _struct.unpack_from("<I", frame_data, 8)[0]
                 msg_class = _struct.unpack_from("<H", frame_data, 18)[0]
+                msg_num = _struct.unpack_from("<H", frame_data, 14)[0]
                 header_size = HEADER_24 if _header_has_payload_offset(msg_class) else HEADER_20
                 payload_offset = (
                     _struct.unpack_from("<I", frame_data, 20)[0] if header_size == HEADER_24 else 0
@@ -455,18 +461,18 @@ class BaichuanFrameReader:
                 # generator resumes with a clean buffer.
                 self._buffer = self._buffer[frame_end:]
 
-                yield cmd_id, resp_code, payload_offset, body
+                yield cmd_id, msg_num, resp_code, payload_offset, body
 
-    async def iter_frames(self) -> AsyncIterator[tuple[int, int, int, bytes]]:
-        """Continuously yield ``(cmd_id, response_code, payload_offset, body)``.
+    async def iter_frames(self) -> AsyncIterator[tuple[int, int, int, int, bytes]]:
+        """Continuously yield ``(cmd_id, msg_num, response_code, payload_offset, body)``.
 
         Unlike the single-read helpers, this iterator yields every frame as it
         arrives, consuming the stream continuously. It is intended for a single
         dedicated consumer (the frame dispatcher) so that no other component
         races on the shared buffer.
         """
-        async for cmd_id, resp_code, payload_offset, body in self._iter_frames():
-            yield cmd_id, resp_code, payload_offset, body
+        async for cmd_id, msg_num, resp_code, payload_offset, body in self._iter_frames():
+            yield cmd_id, msg_num, resp_code, payload_offset, body
 
 
 # ── Frame Dispatcher ──────────────────────────────────────────────────
@@ -493,7 +499,12 @@ class BaichuanFrameDispatcher:
         queues."""
         self._frame_reader = frame_reader
         self._lock = asyncio.Lock()
-        self._waiters: list[tuple[Callable[[int], bool], asyncio.Future]] = []
+        self._waiters: list[
+            tuple[
+                Callable[[int, int], bool],
+                asyncio.Future | asyncio.Queue[tuple[int, int, int, bytes] | None],
+            ]
+        ] = []
         self._event_queue: asyncio.Queue[tuple[int, bytes] | None] = asyncio.Queue(maxsize=256)
         self._task: asyncio.Task | None = None
         self._running = False
@@ -527,16 +538,33 @@ class BaichuanFrameDispatcher:
     async def _dispatch_loop(self) -> None:
         """Read frames and route them to waiters or the event queue."""
         try:
-            async for cmd_id, resp_code, payload_offset, body in self._frame_reader.iter_frames():
+            async for (
+                cmd_id,
+                msg_num,
+                resp_code,
+                payload_offset,
+                body,
+            ) in self._frame_reader.iter_frames():
                 # 1. Resolve a matching request/response waiter (priority).
                 resolved = False
                 async with self._lock:
-                    for i, (pred, fut) in enumerate(self._waiters):
-                        if fut.done():
+                    for i, (pred, target) in enumerate(self._waiters):
+                        # Queue-backed waiters are continuous consumers: they
+                        # stay registered across frames, buffering matches.
+                        if isinstance(target, asyncio.Queue):
+                            if pred(cmd_id, msg_num):
+                                try:
+                                    target.put_nowait((cmd_id, resp_code, payload_offset, body))
+                                except asyncio.QueueFull:
+                                    pass  # slow consumer; drop rather than block
+                                resolved = True
+                                break
                             continue
-                        if pred(cmd_id):
+                        if target.done():
+                            continue
+                        if pred(cmd_id, msg_num):
                             self._waiters.pop(i)
-                            fut.set_result((cmd_id, resp_code, payload_offset, body))
+                            target.set_result((cmd_id, resp_code, payload_offset, body))
                             resolved = True
                             break
                 if resolved:
@@ -555,9 +583,16 @@ class BaichuanFrameDispatcher:
         finally:
             self._running = False
             async with self._lock:
-                for _, future in self._waiters:
-                    if not future.done():
-                        future.set_exception(ConnectionError("Baichuan connection closed"))
+                for _, target in self._waiters:
+                    if isinstance(target, asyncio.Future):
+                        if not target.done():
+                            target.set_exception(ConnectionError("Baichuan connection closed"))
+                    else:
+                        # Signal continuous consumers to stop.
+                        try:
+                            target.put_nowait(None)
+                        except asyncio.QueueFull:
+                            pass
                 self._waiters.clear()
             try:
                 self._event_queue.put_nowait(None)
@@ -570,7 +605,7 @@ class BaichuanFrameDispatcher:
         cmd_id: int,
         *,
         timeout: float,
-        predicate: Callable[[int], bool] | None = None,
+        predicate: Callable[[int, int], bool] | None = None,
         send: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[int, int, int, bytes]:
         """Wait for the next frame matching ``cmd_id``.
@@ -579,11 +614,15 @@ class BaichuanFrameDispatcher:
         response arriving right after the request is not dropped by the
         dispatcher (which owns the socket read).
 
+        ``predicate`` receives ``(cmd_id, msg_num)`` and defaults to a match
+        on ``cmd_id`` alone. Pass a ``msg_num``-aware predicate to correlate a
+        response to the exact command that produced it.
+
         Returns ``(cmd_id, response_code, payload_offset, body)``.
         """
         loop = asyncio.get_event_loop()
         fut: asyncio.Future = loop.create_future()
-        match = predicate or (lambda c: c == cmd_id)
+        match = predicate or (lambda c, m: c == cmd_id)
 
         async with self._lock:
             self._waiters.append((match, fut))
@@ -601,6 +640,56 @@ class BaichuanFrameDispatcher:
                         self._waiters.pop(i)
                         break
             raise
+
+    async def iter_matching(
+        self,
+        cmd_id: int,
+        *,
+        timeout: float,
+        predicate: Callable[[int, int], bool] | None = None,
+        send: Callable[[], Awaitable[None]] | None = None,
+    ) -> AsyncIterator[tuple[int, int, int, bytes]]:
+        """Continuously yield frames matching ``cmd_id`` without registration gaps.
+
+        Unlike :meth:`request` (which registers a single-frame waiter), this
+        registers a persistent queue-backed waiter for the lifetime of the
+        iteration. Frames that arrive while the caller processes the previous
+        frame are buffered instead of dropped, so bursty responses (e.g.
+        binary JPEG snapshot chunks) are never lost between reads.
+
+        ``send`` is awaited once, right after registration and before any frame
+        is read. Yields ``(cmd_id, response_code, payload_offset, body)``.
+        """
+        queue: asyncio.Queue[tuple[int, int, int, bytes] | None] = asyncio.Queue()
+        match = predicate or (lambda c, m: c == cmd_id)
+        loop = asyncio.get_event_loop()
+
+        async with self._lock:
+            self._waiters.append((match, queue))
+
+        try:
+            if send is not None:
+                await send()
+            deadline = loop.time() + timeout
+            while loop.time() < deadline:
+                try:
+                    frame = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=min(1.0, deadline - loop.time()),
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if frame is None:
+                    break
+                yield frame
+        finally:
+            # Remove this continuous waiter so a late frame is never
+            # buffered into a finished iterator.
+            async with self._lock:
+                for i, (_, target) in enumerate(self._waiters):
+                    if target is queue:
+                        self._waiters.pop(i)
+                        break
 
     async def events(self) -> AsyncIterator[tuple[int, bytes]]:
         """Continuously yield push-event frames routed by the dispatcher."""
@@ -864,6 +953,9 @@ class BaichuanApiClient:
                 cmd_id,
                 timeout=self.timeout,
                 send=send,
+                # Correlate the response to the exact command: concurrent
+                # commands sharing a cmd_id must not steal each other's frames.
+                predicate=lambda c, m: c == cmd_id and m == msg_num,
             )
         except asyncio.TimeoutError:
             raise ReolinkError("No response received from camera (timeout)")
@@ -1285,7 +1377,7 @@ class BaichuanApiClient:
                     send=_send_subscribe,
                 )
                 last_code = resp_code
-                if resp_code == 200:
+                if resp_code in (0, 200):
                     logger.info(
                         "Reolink subscribed to events (channelId=%d)",
                         channel_id,
@@ -1346,7 +1438,7 @@ class BaichuanApiClient:
                 timeout=self.timeout,
                 send=_send_ping,
             )
-            return resp_code == 200
+            return resp_code in (0, 200)
         except (asyncio.TimeoutError, ReolinkError, Exception):
             logger.debug("Reolink ping failed (no response)")
             return False
@@ -1603,19 +1695,15 @@ class BaichuanApiClient:
                     return True
             return False
 
-        first = True
-        while asyncio.get_event_loop().time() < timeout_at:
-            try:
-                resp_cmd, resp_code, payload_offset, resp_body = await self._dispatcher.request(
-                    BC_CMD_ID_SNAPSHOT,
-                    timeout=min(2.0, timeout_at - asyncio.get_event_loop().time()),
-                    # Send only once; subsequent frames are binary JPEG chunks.
-                    send=_send_snapshot if first else None,
-                )
-                first = False
-            except asyncio.TimeoutError:
-                break
-
+        # Register a single continuous waiter for the whole capture window so
+        # binary JPEG chunks arriving between frames are buffered, not dropped
+        # by the dispatcher. The request is sent once, right after registration.
+        remaining = timeout_at - asyncio.get_event_loop().time()
+        async for resp_cmd, resp_code, payload_offset, resp_body in self._dispatcher.iter_matching(
+            BC_CMD_ID_SNAPSHOT,
+            timeout=remaining,
+            send=_send_snapshot,
+        ):
             if resp_cmd != BC_CMD_ID_SNAPSHOT:
                 continue
 
