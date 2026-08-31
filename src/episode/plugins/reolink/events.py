@@ -22,16 +22,22 @@ from episode.plugins.reolink.client import (
 logger = logging.getLogger(__name__)
 
 EVENT_MAP = {
-    "human_detection": ("human", "person", "people"),
-    "vehicle_detection": ("vehicle", "car"),
-    "pet_detection": ("pet", "animal"),
-    "ladder_detection": ("ladder",),
+    # Audio
+    "audio_detection_detection": ("audio", "sound"),
+    # Image
     "face_detection": ("face",),
-    "motion_detection": ("motion", "movement", "mov"),
-    "doorbell": ("doorbell", "ring"),
-    "audio_detection": ("audio", "sound"),
-    "line_crossing": ("line", "cross"),
-    "system": ("motion",),
+    "human_detection": ("human", "person", "people"),
+    "ladder_detection": ("ladder",),
+    "line_crossing_detection": ("line", "cross"),
+    "loitering_detection": ("loitering",),
+    "motion_detection": ("motion", "movement", "mov", "md"),
+    "package_detection": ("package",),
+    "pet_detection": ("pet", "animal", "dot_cat", "dog", "cat"),
+    "vehicle_detection": ("vehicle", "car"),
+    # Other events
+    "tampering_detection": ("vt",),
+    "doorbell": ("doorbell", "ring", "visitor"),
+    "system": ("system",),
 }
 
 
@@ -290,43 +296,71 @@ def _parse_xml(data: bytes):
 
 
 def _extract_events_from_root(root, channel: int) -> list[ReolinkEvent]:
-    """Extract event objects from an XML root element."""
+    """Extract event objects from an XML root element converted to a dictionary."""
     events: list[ReolinkEvent] = []
 
-    # Various possible structures depending on situation and camera:
-    # 1. Root -> AlarmEventList -> AlarmEvent (multiple)  [Reolink native]
-    # 2. Root -> AlarmEventList -> Event (multiple)
-    # 3. Root -> Event (direct)
-    # 4. Root -> param -> AlarmEventList -> AlarmEvent/Event
-    # 5. Root -> AlarmEvent (direct)
+    # Convert the entire XML tree to a dictionary
+    full_dict = _xml_to_dict(root)
+    if not full_dict:
+        return events
 
-    event_elements = []
+    # Get the root tag and its content
+    root_tag = list(full_dict.keys())[0]
+    content = full_dict[root_tag]
 
-    # Check for AlarmEventList wrapper
-    alarm_list = root.find("AlarmEventList")
-    if alarm_list is not None:
-        for child in alarm_list:
-            if child.tag in ("Event", "AlarmEventList", "AlarmEvent"):
-                event_elements.extend(_find_event_children(child))
-    else:
-        # Check for direct Event / AlarmEvent elements
-        event_elements.extend(root.findall("Event"))
-        event_elements.extend(root.findall("AlarmEvent"))
-        # Check for param wrapper
-        param = root.find("param")
-        if param is not None:
-            for child in param:
-                if child.tag == "AlarmEventList":
-                    event_elements.extend(_find_event_children(child))
-                elif child.tag in ("Event", "AlarmEvent"):
-                    event_elements.append(child)
+    event_dicts = []
 
-    # If no specific event structure found, treat the whole XML as one event
-    if not event_elements and root is not None:
-        event_elements = [root]
+    # Helper function to extract elements and keep their wrapping tag
+    def _extract_wrapped(parent_dict: dict, tag: str) -> list[dict]:
+        if not isinstance(parent_dict, dict) or tag not in parent_dict:
+            return []
+        items = parent_dict[tag]
+        if not isinstance(items, list):
+            items = [items]
+        # Returns in the {"Tag": {...}} format that interpret_event expects
+        return [{tag: item} for item in items]
 
-    for elem in event_elements:
-        event_dict = _xml_to_dict(elem)
+    if isinstance(content, dict):
+        # 1 and 2. Root -> AlarmEventList -> AlarmEvent / Event
+        if "AlarmEventList" in content:
+            alarm_lists = content["AlarmEventList"]
+            if not isinstance(alarm_lists, list):
+                alarm_lists = [alarm_lists]
+
+            for al in alarm_lists:
+                if isinstance(al, dict):
+                    event_dicts.extend(_extract_wrapped(al, "Event"))
+                    event_dicts.extend(_extract_wrapped(al, "AlarmEvent"))
+        else:
+            # 3 and 5. Direct Event / AlarmEvent elements
+            event_dicts.extend(_extract_wrapped(content, "Event"))
+            event_dicts.extend(_extract_wrapped(content, "AlarmEvent"))
+
+            # 4. Root -> param -> AlarmEventList -> AlarmEvent/Event
+            if "param" in content:
+                params = content["param"]
+                if not isinstance(params, list):
+                    params = [params]
+
+                for p in params:
+                    if isinstance(p, dict):
+                        if "AlarmEventList" in p:
+                            al_list = p["AlarmEventList"]
+                            if not isinstance(al_list, list):
+                                al_list = [al_list]
+                            for al in al_list:
+                                if isinstance(al, dict):
+                                    event_dicts.extend(_extract_wrapped(al, "Event"))
+                                    event_dicts.extend(_extract_wrapped(al, "AlarmEvent"))
+                        else:
+                            event_dicts.extend(_extract_wrapped(p, "Event"))
+                            event_dicts.extend(_extract_wrapped(p, "AlarmEvent"))
+
+    # If no specific structure is found, treat the entire dictionary as a single event
+    if not event_dicts and full_dict:
+        event_dicts = [full_dict]
+
+    for event_dict in event_dicts:
         event = interpret_event(event_dict)
         if event.channel == 0 and channel:
             event = _replace_field(event, "channel", channel)
@@ -346,43 +380,49 @@ def _find_event_children(parent) -> list:
     return events
 
 
-def _xml_to_dict(element, prefix: str = "") -> dict[str, Any]:
-    """Convert XML element to dict, preserving structure."""
+def _xml_to_dict(element) -> dict[str, Any]:
+    """Convert an XML element to a dict"""
     result: dict[str, Any] = {}
-    full_tag = f"{prefix}.{element.tag}" if prefix else element.tag
 
-    # Check for attributes
     if element.attrib:
         result["@attributes"] = dict(element.attrib)
 
     children = list(element)
+    text = (element.text or "").strip()
+
     if not children:
-        # Leaf node
-        text = (element.text or "").strip()
+        # Leaf Node
+        val: Any = text
         if text:
             try:
-                result["_value"] = int(text)
+                val = int(text)
             except ValueError:
                 try:
-                    result["_value"] = float(text)
+                    val = float(text)
                 except ValueError:
-                    result["_value"] = text
-            if element.tag:
-                result[element.tag] = result.get(element.tag, result.get("_value", text))
-        elif element.tag:
-            result[element.tag] = ""
-    else:
-        for child in children:
-            child_dict = _xml_to_dict(child, full_tag)
-            for key, val in child_dict.items():
-                if key in result:
-                    if not isinstance(result[key], list):
-                        result[key] = [result[key]]
-                    result[key].append(val)
-                else:
-                    result[key] = val
+                    pass
 
-    return result
+        # return {tag: valor}
+        if not element.attrib:
+            return {element.tag: val if val != "" else ""}
+
+        # handle attributes
+        if val != "":
+            result["_value"] = val
+        return {element.tag: result}
+
+    # Process children
+    for child in children:
+        child_dict = _xml_to_dict(child)
+        for key, val in child_dict.items():
+            if key in result:
+                if not isinstance(result[key], list):
+                    result[key] = [result[key]]
+                result[key].append(val)
+            else:
+                result[key] = val
+
+    return {element.tag: result}
 
 
 def _extract_timestamp(payload: dict[str, Any]) -> datetime:
@@ -438,36 +478,71 @@ def _try_parse_timestamp(value) -> datetime | None:
 
 def _map_event_type(payload: dict[str, Any]) -> str:
     """Map event payload to canonical event type string."""
-    # Check various possible keys
+    # Unwrap the payload if it comes nested inside its root XML tag
+    if len(payload) == 1 and list(payload.keys())[0] in ("AlarmEvent", "Event"):
+        payload = list(payload.values())[0]
+        if not isinstance(payload, dict):
+            payload = {}
+
+    # Check various possible keys at the root level of the unwrapped payload
     cmd = payload.get("cmd", "")
     event_type_val = payload.get("type", "")
     channel_event = payload.get("channelEvent", "")
     event_type = payload.get("eventType", "")
     ai_type = payload.get("AItype") or payload.get("aiType") or payload.get("aitype") or ""
+    status = payload.get("status", "")
 
     def get_strings_to_check():
-        """Yield candidate type strings, from AItype, type fields, and any
-        string values nested anywhere in the payload."""
-        # 1: ai_str
-        yield str(ai_type).lower()
+        """Yield candidate type strings in priority order: AI types first,
+        then fallback to generic status and nested payload texts."""
 
-        # 2: type_str (also covers list-valued fields via their repr, e.g.
-        #    type=["intrusion","people"] -> "['intrusion', 'people']")
+        # 1: Direct AI type (ignore "none" so it doesn't mask valid nested types)
+        if str(ai_type).lower() != "none":
+            yield str(ai_type).lower()
+
+        # 2: Baichuan smartAiTypeList structure
+        smart_ai_list = payload.get("smartAiTypeList", {})
+        if isinstance(smart_ai_list, dict):
+            smart_ai = smart_ai_list.get("smartAiType", {})
+            # Ensure it is iterable
+            if not isinstance(smart_ai, list):
+                smart_ai = [smart_ai]
+
+            for ai_item in smart_ai:
+                if isinstance(ai_item, dict):
+                    # Yield main type (e.g., "intrusion")
+                    yield str(ai_item.get("type", "")).lower()
+
+                    # Yield sub-types (e.g., "people", "dog_cat")
+                    sub_list = ai_item.get("subList", {})
+                    if isinstance(sub_list, dict):
+                        sub_types = sub_list.get("type", [])
+                        if not isinstance(sub_types, list):
+                            sub_types = [sub_types]
+                        for st in sub_types:
+                            yield str(st).lower()
+
+        # 3: Common event string fields
         yield str(cmd or event_type_val or channel_event or event_type or "").lower()
 
-        # 3: all string values anywhere in the payload, including list-valued
-        #    fields (type) and nested structures (_value array).
-        for text in _iter_texts(payload):
-            if text and text.strip():
-                yield text.lower()
+        # 4: Status field (catches generic "MD" motion detection)
+        yield str(status).lower()
 
-        # 4: dict 'param'
+        # 5: Dict 'param'
         param = payload.get("param")
         if isinstance(param, dict):
             for key in ("type", "event", "event_type"):
                 val = param.get(key, "")
                 if isinstance(val, str) and val.strip():
                     yield val.lower()
+
+        # 6: All string values anywhere in the payload as a last resort
+        try:
+            for text in _iter_texts(payload):
+                if text and text.strip() and str(text).lower() != "none":
+                    yield text.lower()
+        except NameError:
+            pass  # Fallback in case _iter_texts is not available in the namespace
 
     for text in get_strings_to_check():
         if not text:
